@@ -111,7 +111,7 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
     try:
         output_filename = os.path.join(task_dir, "audio")
         
-        # Exact yt_dlp options requested by user (no cookies, no extra proxy settings)
+        # Exact yt_dlp options requested by user
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": output_filename,
@@ -123,6 +123,12 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
             "quiet": True,
             "noprogress": True,
         }
+        
+        # Check if cookies file exists
+        cookies_path = "cookies.txt"
+        if os.path.exists(cookies_path):
+            ydl_opts["cookiefile"] = cookies_path
+            print(f"[{task_id}] Using cookies from {cookies_path} for yt-dlp...")
         
         # Run downloader in separate thread to prevent blocking FastAPI's event loop
         loop = asyncio.get_event_loop()
