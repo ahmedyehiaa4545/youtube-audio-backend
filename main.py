@@ -12,6 +12,10 @@ import yt_dlp
 
 app = FastAPI(title="YouTube Audio Downloader API", description="Standalone API for downloading audio from YouTube")
 
+@app.on_event("startup")
+def startup_event():
+    print(f"Startup: cookies.txt exists = {os.path.exists('cookies.txt')}", flush=True)
+
 # Enable CORS for all origins so that Netlify/React frontends can consume the API
 app.add_middleware(
     CORSMiddleware,
@@ -52,7 +56,15 @@ async def schedule_dir_cleanup(path: str, delay_seconds: int = 600):
 
 @app.get("/")
 def read_root():
-    return {"status": "running", "service": "YouTube Audio Downloader"}
+    exists = os.path.exists("cookies.txt")
+    size = os.path.getsize("cookies.txt") if exists else 0
+    return {
+        "status": "running",
+        "service": "YouTube Audio Downloader",
+        "cookies_detected": exists,
+        "cookies_size_bytes": size,
+        "files_in_dir": os.listdir(".")
+    }
 
 @app.post("/api/transcribe-gemini")
 async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTasks):
@@ -76,6 +88,12 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
             "noprogress": True,
         }
         
+        # Check if cookies.txt exists in the current directory (uploaded by user)
+        cookie_file = "cookies.txt"
+        if os.path.exists(cookie_file):
+            ydl_opts["cookiefile"] = cookie_file
+            print(f"[{task_id}] Using cookies.txt for yt-dlp authentication.", flush=True)
+        
         # Run downloader in separate thread to prevent blocking FastAPI's event loop
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: download_audio_executor(req.youtubeUrl, ydl_opts))
@@ -84,7 +102,7 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
         if not os.path.exists(audio_path):
             raise Exception("Audio file was not created by yt-dlp postprocessor.")
             
-        print(f"[{task_id}] Successfully downloaded YouTube audio: {audio_path}")
+        print(f"[{task_id}] Successfully downloaded YouTube audio: {audio_path}", flush=True)
         
         # Schedule cleanup in the background after 10 minutes to save disk space
         background_tasks.add_task(schedule_dir_cleanup, task_dir, 600)
