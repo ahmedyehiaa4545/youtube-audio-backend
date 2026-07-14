@@ -6,11 +6,12 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies (including ffmpeg)
+# Install system dependencies (including ffmpeg and nodejs for yt-dlp signature decryption)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     ffmpeg \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install python dependencies
