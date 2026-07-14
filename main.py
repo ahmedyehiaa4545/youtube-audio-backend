@@ -98,8 +98,9 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
         
         # Configure yt_dlp options identical to the working method5
         ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,
+            'no_warnings': False,
+            'verbose': True,
             'source_address': '0.0.0.0',
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
