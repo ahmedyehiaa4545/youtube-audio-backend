@@ -137,16 +137,27 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
         audio_url = audio_formats[0]['url']
         audio_path = output_filename + ".mp3"
         
+        # Extract HTTP headers from yt-dlp to pass to FFmpeg (critical to avoid 403 Forbidden)
+        headers_dict = audio_formats[0].get('http_headers', {})
+        headers_str = "".join(f"{k}: {v}\r\n" for k, v in headers_dict.items())
+        user_agent = headers_dict.get('User-Agent', '')
+        
         # Download and transcode direct stream URL to 64k mp3 using FFmpeg
         print(f"[{task_id}] Downloading and transcoding stream to MP3...", flush=True)
         ffmpeg_cmd = [
             'ffmpeg', '-y',
+            '-headers', headers_str
+        ]
+        if user_agent:
+            ffmpeg_cmd.extend(['-user_agent', user_agent])
+            
+        ffmpeg_cmd.extend([
             '-i', audio_url,
             '-vn',
             '-c:a', 'libmp3lame',
             '-b:a', '64k',
             audio_path
-        ]
+        ])
         
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
