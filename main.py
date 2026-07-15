@@ -75,6 +75,30 @@ class ShortsResponse(BaseModel):
 class SuggestShortsRequest(BaseModel):
     transcription: str
     geminiApiKey: str
+    numShorts: int = 3
+
+class CutRequest(BaseModel):
+    url: str
+    start_time: str
+    end_time: str
+    quality: int = 720
+
+def parse_time_to_seconds(time_str: str) -> float:
+    """Convert HH:MM:SS or MM:SS or raw seconds to float seconds"""
+    try:
+        return float(time_str)
+    except ValueError:
+        pass
+
+    parts = time_str.split(':')
+    if len(parts) == 3:
+        h, m, s = parts
+        return float(h) * 3600 + float(m) * 60 + float(s)
+    elif len(parts) == 2:
+        m, s = parts
+        return float(m) * 60 + float(s)
+    else:
+        raise ValueError(f"Invalid time format: {time_str}")
 
 def extract_video_id(url: str) -> str | None:
     pattern = r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})'
@@ -363,9 +387,9 @@ async def suggest_shorts(req: SuggestShortsRequest):
         
         prompt = (
             "أنت خبير محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
-            "قم بتحليل النص المفرغ التالي (الذي يحتوي على توقيتات دقيقة)، واستخرج منه أفضل 3 مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
+            f"قم بتحليل النص المفرغ التالي (الذي يحتوي على توقيتات دقيقة)، واستخرج منه أفضل {req.numShorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
             "شروط استخراج كل مقطع:\n"
-            "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق. لا تخترع توقيتات جديدة.\n"
+            "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة in النص المرفق. لا تخترع توقيتات جديدة.\n"
             "2. يجب أن تتراوح مدة كل مقطع بين 15 ثانية إلى 60 ثانية تقريباً.\n"
             "3. يجب تحديد 'الخطاف' (Hook) وهو أول جملة أو فكرة تشد المشاهد في أول 3 ثوانٍ.\n"
             "4. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
@@ -391,3 +415,133 @@ async def suggest_shorts(req: SuggestShortsRequest):
     except Exception as e:
         print(f"Failed to suggest shorts: {e}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+import subprocess
+
+TEMP_CUTS_DIR = os.path.abspath("temp_cuts")
+os.makedirs(TEMP_CUTS_DIR, exist_ok=True)
+
+async def schedule_file_cleanup(filepath: str, delay_seconds: int = 300):
+    await asyncio.sleep(delay_seconds)
+    if os.path.exists(filepath):
+        try:
+            os.remove(filepath)
+            print(f"Cleaned up cut file: {filepath}", flush=True)
+        except Exception as e:
+            print(f"Error cleaning up {filepath}: {e}", flush=True)
+
+@app.post("/api/cut")
+async def cut_video(req: CutRequest, background_tasks: BackgroundTasks):
+    if req.quality not in [360, 480, 720, 1080, 1440, 2160]:
+        raise HTTPException(400, "quality must be 360, 480, 720, 1080, 1440, or 2160")
+
+    try:
+        start_sec = parse_time_to_seconds(req.start_time)
+        end_sec = parse_time_to_seconds(req.end_time)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid start_time or end_time: {str(e)}")
+
+    if start_sec >= end_sec:
+        raise HTTPException(400, "start_time must be less than end_time")
+
+    duration_sec = end_sec - start_sec
+    file_id = str(uuid.uuid4())[:8]
+    output_path = os.path.join(TEMP_CUTS_DIR, f"{file_id}.mp4")
+
+    # yt-dlp options to extract info without blocking
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'source_address': '0.0.0.0',
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+        }
+    }
+
+    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+        ydl_opts['cookiefile'] = COOKIE_FILE_PATH
+
+    print(f"⏳ Extracting stream URLs for quality {req.quality}p...", flush=True)
+    try:
+        loop = asyncio.get_event_loop()
+        info = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(req.url, download=False))
+    except Exception as e:
+        raise HTTPException(500, f"Failed to extract video info: {str(e)}")
+
+    # Filter video formats (MP4, <= quality)
+    video_formats = [
+        f for f in info.get('formats', [])
+        if f.get('vcodec') != 'none'
+        and f.get('acodec') == 'none'
+        and f.get('ext') == 'mp4'
+        and (f.get('height', 0) <= req.quality)
+    ]
+    video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
+
+    if not video_formats:
+        # Fallback to any MP4 video stream
+        video_formats = [
+            f for f in info.get('formats', [])
+            if f.get('vcodec') != 'none'
+            and f.get('acodec') == 'none'
+            and f.get('ext') == 'mp4'
+        ]
+        video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
+
+    if not video_formats:
+        raise HTTPException(500, "Could not find a suitable MP4 video stream")
+
+    video_url = video_formats[0]['url']
+
+    # Filter audio formats (best ABR)
+    audio_formats = [
+        f for f in info.get('formats', [])
+        if f.get('acodec') != 'none'
+        and f.get('vcodec') == 'none'
+    ]
+    audio_formats.sort(key=lambda x: x.get('abr', 0), reverse=True)
+
+    if not audio_formats:
+        raise HTTPException(500, "Could not find a suitable audio stream")
+
+    audio_url = audio_formats[0]['url']
+
+    print(f"🎬 Processing segment: {req.start_time} to {req.end_time}...", flush=True)
+    
+    ffmpeg_cmd = [
+        'ffmpeg', '-y',
+        '-ss', str(start_sec), '-i', video_url,
+        '-ss', str(start_sec), '-i', audio_url,
+        '-t', str(duration_sec),
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',   # ultrafast reduces ram to 150mb and prevents OOM
+        '-crf', '20',             # very high quality
+        '-threads', '1',          # one processing thread to prevent ram spikes on Railway
+        '-c:a', 'aac', '-b:a', '192k',
+        '-movflags', '+faststart',
+        output_path
+    ]
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: subprocess.run(ffmpeg_cmd, capture_output=True, text=True))
+    except Exception as e:
+        raise HTTPException(500, f"FFmpeg execution error: {str(e)}")
+
+    if result.returncode != 0:
+        if os.path.exists(output_path):
+            try: os.remove(output_path)
+            except: pass
+        raise HTTPException(500, f"FFmpeg processing failed: {result.stderr}")
+
+    if not os.path.exists(output_path):
+        raise HTTPException(500, "Output MP4 file was not generated")
+
+    background_tasks.add_task(schedule_file_cleanup, output_path, 300)
+
+    return FileResponse(
+        output_path,
+        media_type="video/mp4",
+        filename=f"cut_{file_id}.mp4"
+    )
