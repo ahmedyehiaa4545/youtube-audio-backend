@@ -9,7 +9,8 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import List
 import yt_dlp
 import google.generativeai as genai
 from pydub import AudioSegment
@@ -60,6 +61,20 @@ init_cookies()
 class DownloadRequest(BaseModel):
     youtubeUrl: str
     geminiApiKey: str | None = None
+
+class ShortSuggestion(BaseModel):
+    title: str = Field(description="عنوان جذاب ومثير للمقطع القصير")
+    start_time: str = Field(description="توقيت بداية المقطع بالصيغة MM:SS أو HH:MM:SS بدقة من النص")
+    end_time: str = Field(description="توقيت نهاية المقطع بالصيغة MM:SS أو HH:MM:SS بدقة من النص")
+    script: str = Field(description="النص الكامل للمقطع القصير كما ورد في التفريغ")
+    hook: str = Field(description="الجملة أو الفكرة الافتتاحية الجذابة (الخطاف) في أول 3 ثوانٍ")
+
+class ShortsResponse(BaseModel):
+    shorts: List[ShortSuggestion]
+
+class SuggestShortsRequest(BaseModel):
+    transcription: str
+    geminiApiKey: str
 
 def extract_video_id(url: str) -> str | None:
     pattern = r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})'
@@ -324,4 +339,55 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
     except Exception as e:
         clean_temp_dir(task_dir)
         print(f"[{task_id}] Failed to process audio: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/suggest-shorts")
+async def suggest_shorts(req: SuggestShortsRequest):
+    if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
+        raise HTTPException(status_code=400, detail="Gemini API key is missing or invalid.")
+    
+    if not req.transcription or req.transcription.strip() == "":
+        raise HTTPException(status_code=400, detail="Transcription content is empty.")
+    
+    try:
+        genai.configure(api_key=req.geminiApiKey)
+        
+        # Use structured JSON outputs with Gemini to guarantee perfect schema match
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-flash",
+            generation_config={
+                "response_mime_type": "application/json",
+                "response_schema": ShortsResponse
+            }
+        )
+        
+        prompt = (
+            "أنت خبير محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
+            "قم بتحليل النص المفرغ التالي (الذي يحتوي على توقيتات دقيقة)، واستخرج منه أفضل 3 مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
+            "شروط استخراج كل مقطع:\n"
+            "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق. لا تخترع توقيتات جديدة.\n"
+            "2. يجب أن تتراوح مدة كل مقطع بين 15 ثانية إلى 60 ثانية تقريباً.\n"
+            "3. يجب تحديد 'الخطاف' (Hook) وهو أول جملة أو فكرة تشد المشاهد في أول 3 ثوانٍ.\n"
+            "4. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
+            "5. صياغة عنوان جذاب جداً ومثير للاهتمام (Catchy Title) لكل مقطع.\n\n"
+            "النص المفرغ المراد تحليله:\n"
+            f"{req.transcription}"
+        )
+        
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, lambda: model.generate_content(prompt))
+        
+        import json
+        try:
+            shorts_data = json.loads(response.text)
+            return {
+                "status": "success",
+                "shorts": shorts_data.get("shorts", [])
+            }
+        except Exception as parse_err:
+            print(f"Failed to parse Gemini JSON: {parse_err}. Raw response: {response.text}", flush=True)
+            raise Exception("Failed to parse AI response into structured shorts format.")
+            
+    except Exception as e:
+        print(f"Failed to suggest shorts: {e}", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
