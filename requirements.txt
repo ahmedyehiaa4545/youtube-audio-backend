@@ -3,3 +3,5 @@ uvicorn
 python-multipart
 pydantic
 yt-dlp
+google-generativeai
+pydub

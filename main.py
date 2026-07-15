@@ -9,8 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
+import google.generativeai as genai
+from pydub import AudioSegment
 
-app = FastAPI(title="YouTube Audio Downloader API", description="Standalone API for downloading audio from YouTube using Deno + Cookies + yt-dlp")
+app = FastAPI(title="YouTube Audio Downloader API", description="Standalone API for downloading and transcribing audio from YouTube using Gemini + Deno + Cookies + yt-dlp")
 
 # Enable CORS for all origins so that Netlify/React frontends can consume the API
 app.add_middleware(
@@ -60,6 +62,81 @@ class DownloadRequest(BaseModel):
 def download_audio_executor(youtube_url: str, opts: dict):
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([youtube_url])
+
+def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: int = 7) -> str:
+    genai.configure(api_key=api_key)
+    # Use the model requested by the user
+    selected_model = "gemini-3.1-flash-lite"
+    full_transcription = ""
+
+    print(f"🟢 النموذج المستخدم: {selected_model}", flush=True)
+
+    # Load audio file using pydub
+    audio = AudioSegment.from_mp3(audio_path)
+    chunk_length_ms = chunk_minutes * 60 * 1000
+    
+    # Split audio into chunks
+    chunks = []
+    for i in range(0, len(audio), chunk_length_ms):
+        chunks.append(audio[i:i + chunk_length_ms])
+
+    print(f"[+] تم تقسيم الصوت إلى {len(chunks)} أجزاء.", flush=True)
+
+    for idx, chunk in enumerate(chunks):
+        print(f"\n[*] معالجة الجزء {idx + 1}/{len(chunks)}", flush=True)
+
+        chunk_filename = f"chunk_{idx}_{uuid.uuid4().hex[:6]}.mp3"
+        chunk_path = os.path.join(os.path.dirname(audio_path), chunk_filename)
+        chunk.export(chunk_path, format="mp3")
+
+        uploaded_file = None
+
+        try:
+            print("   - جاري رفع الملف...", flush=True)
+            uploaded_file = genai.upload_file(path=chunk_path)
+
+            while uploaded_file.state.name == "PROCESSING":
+                time.sleep(3)
+                uploaded_file = genai.get_file(uploaded_file.name)
+
+            if uploaded_file.state.name == "FAILED":
+                print("❌ فشل رفع الملف.", flush=True)
+                continue
+
+            print("   - جاري إرسال الطلب إلى Gemini...", flush=True)
+
+            model = genai.GenerativeModel(selected_model)
+
+            prompt = """
+اسمع الملف الصوتي المرفق بتركيز.
+قم بتفريغ المحتوى كاملاً باللغة العربية.
+لا تلخص ولا تحذف أي شيء.
+"""
+
+            response = model.generate_content([prompt, uploaded_file])
+
+            print("✅ تم تفريغ الجزء.", flush=True)
+
+            full_transcription += response.text + "\n\n"
+
+        except Exception as e:
+            print(f"❌ خطأ في تفريغ الجزء {idx + 1}: {e}", flush=True)
+            raise e
+
+        finally:
+            if uploaded_file:
+                try:
+                    genai.delete_file(uploaded_file.name)
+                except:
+                    pass
+
+            if os.path.exists(chunk_path):
+                try:
+                    os.remove(chunk_path)
+                except:
+                    pass
+
+    return full_transcription
 
 def clean_temp_dir(path: str):
     """Clean up the temporary directory after some delay or on request"""
@@ -129,12 +206,25 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
             
         print(f"[{task_id}] Successfully downloaded and transcoded audio: {audio_path}", flush=True)
         
+        # Verify Gemini API Key exists
+        if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
+            raise Exception("Gemini API key is missing or invalid.")
+            
+        print(f"[{task_id}] Transcribing audio with Gemini...", flush=True)
+        # Call the transcription function
+        loop = asyncio.get_event_loop()
+        transcription_text = await loop.run_in_executor(
+            None, 
+            lambda: transcribe_audio_with_gemini(audio_path, req.geminiApiKey)
+        )
+        
         # Schedule cleanup in the background after 10 minutes to save disk space
         background_tasks.add_task(schedule_dir_cleanup, task_dir, 600)
         
         return {
             "status": "success",
-            "audioUrl": f"public/temp_{task_id}/audio.mp3"
+            "audioUrl": f"public/temp_{task_id}/audio.mp3",
+            "transcription": transcription_text
         }
         
     except Exception as e:
