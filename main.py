@@ -107,26 +107,12 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
 
             model = genai.GenerativeModel(selected_model)
 
-            # Calculate absolute starting time offset for the current chunk
-            start_seconds = idx * chunk_minutes * 60
-            offset_hours = start_seconds // 3600
-            offset_mins = (start_seconds % 3600) // 60
-            offset_secs = start_seconds % 60
-            offset_str = f"{offset_hours:02d}:{offset_mins:02d}:{offset_secs:02d}"
-
-            prompt = f"""
-اسمع الملف الصوتي المرفق بتركيز.
-قم بتفريغ المحتوى كاملاً باللغة العربية مع كتابة التوقيت الزمني (Timestamp) الدقيق لبداية ونهاية كل جملة أو عبارة قصيرة.
-
-هام جداً: هذا المقطع الصوتي مجتزأ ويبدأ من التوقيت {offset_str} (تنسيق ساعات:دقائق:ثواني) من الفيديو الأصلي.
-يجب عليك إضافة هذا التوقيت كأساس (offset) لجميع التواقيت الزمنية التي تكتبها لتطابق الفيديو الأصلي تماماً.
-مثال: إذا بدأ الكلام في الثانية العاشرة من هذا الملف الصوتي، وبما أن الملف يبدأ عند {offset_str}، فإن التوقيت الفعلي للكلام هو بعد 10 ثوانٍ من {offset_str}، فيُكتب [00:07:10] (إذا كان البدء عند 7 دقائق).
-
-اكتب النتيجة كسطور متتالية بالتنسيق التالي لكل عبارة:
-[HH:MM:SS - HH:MM:SS] النص المفرغ
-
-تأكد من دقة التوقيتات ومطابقتها التامة للصوت، ولا تلخص أو تحذف أي جزء من الكلام.
-"""
+            prompt = (
+                "اسمع الملف الصوتي المرفق بتركيز. "
+                "قم بتفريغ المحتوى كاملاً باللغة العربية مع توقيتات دقيقة تبدأ من [00:00]. "
+                "لا تلخص واكتب كل ما تسمعه.\n\n"
+                "تنسيق المخرجات المطلوب حصراً:\n[00:05 -> 00:10] النص العربي هنا"
+            )
 
             response = model.generate_content([prompt, uploaded_file])
 
