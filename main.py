@@ -4,6 +4,7 @@ import uuid
 import shutil
 import asyncio
 import time
+import requests
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,9 +61,87 @@ class DownloadRequest(BaseModel):
     youtubeUrl: str
     geminiApiKey: str | None = None
 
-def download_audio_executor(youtube_url: str, opts: dict):
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([youtube_url])
+def extract_video_id(url: str) -> str | None:
+    pattern = r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})'
+    match = re.search(pattern, url)
+    return match.group(1) if match else None
+
+def download_audio_via_rapidapi(youtube_url: str, output_path: str) -> str:
+    video_id = extract_video_id(youtube_url)
+    if not video_id:
+        raise Exception("رابط الفيديو غير صالح!")
+
+    RAPID_API_KEY = os.environ.get("RAPID_API_KEY", "78aaeed1d3mshdc777f49020e221p1803c4jsn35138c026a86")
+
+    headers = {
+        'x-rapidapi-host': 'youtube-mp4-mp3-downloader.p.rapidapi.com',
+        'x-rapidapi-key': RAPID_API_KEY,
+        'Content-Type': 'application/json'
+    }
+
+    # 1. إرسال طلب البدء بالتحويل والحصول على الـ Task ID
+    print(f"[*] Sending download request to RapidAPI for video ID: {video_id}...", flush=True)
+    api_url = "https://youtube-mp4-mp3-downloader.p.rapidapi.com/api/v1/download"
+    params = {
+        'format': 'mp3',
+        'id': video_id,
+        'audioQuality': '251',
+        'addInfo': 'false',
+        'allowExtendedDuration': 'false'
+    }
+
+    response = requests.get(api_url, headers=headers, params=params)
+    if response.status_code != 200:
+        raise Exception(f"Failed to start conversion. Status code: {response.status_code}. Detail: {response.text}")
+    
+    res_data = response.json()
+    task_id = res_data.get('progressId') or res_data.get('id')
+    if not task_id:
+        raise Exception(f"Task ID not found in response: {res_data}")
+
+    print(f"[+] Conversion started. Task ID: {task_id}", flush=True)
+
+    # 2. Polling loop
+    progress_url = "https://youtube-mp4-mp3-downloader.p.rapidapi.com/api/v1/progress"
+    download_url = None
+    max_retries = 60  # 5 minutes max
+    
+    for attempt in range(max_retries):
+        print(f"[*] Checking conversion progress... (attempt {attempt + 1})", flush=True)
+        
+        progress_res = requests.get(progress_url, headers=headers, params={'id': task_id})
+        if progress_res.status_code != 200:
+            print(f"⚠️ Progress request failed: {progress_res.status_code}. Retrying...", flush=True)
+            time.sleep(5)
+            continue
+            
+        progress_data = progress_res.json()
+        
+        if progress_data.get('finished') is True or progress_data.get('status') == 'Finished':
+            download_url = progress_data.get('downloadUrl')
+            print(f"🎉 Conversion finished on RapidAPI server!", flush=True)
+            break
+        elif progress_data.get('status') in ['Failed', 'Error']:
+            raise Exception(f"Conversion failed on RapidAPI server: {progress_data}")
+            
+        time.sleep(5)
+
+    if not download_url:
+        raise Exception("Timeout waiting for conversion to finish on RapidAPI.")
+
+    # 3. Download the converted MP3 file
+    print("[*] Downloading MP3 file from RapidAPI...", flush=True)
+    audio_res = requests.get(download_url, stream=True)
+    if audio_res.status_code != 200:
+        raise Exception(f"Failed to download audio file. Status: {audio_res.status_code}")
+        
+    with open(output_path, 'wb') as f:
+        for chunk in audio_res.iter_content(chunk_size=1024*1024):
+            if chunk:
+                f.write(chunk)
+                
+    print("[+] Audio downloaded and saved successfully.", flush=True)
+    return output_path
 
 # دالة لضبط التوقيتات برمجياً (رياضياً)
 def adjust_timestamps(text: str, offset_minutes: int) -> str:
@@ -210,38 +289,16 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
     try:
         output_filename = os.path.join(task_dir, "audio")
         
-        # Configure yt_dlp options to download and extract audio directly
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': output_filename,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '64',
-            }],
-            'quiet': False,
-            'no_warnings': False,
-            'verbose': True,
-            'source_address': '0.0.0.0',
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
-            }
-        }
+        print(f"[{task_id}] Downloading YouTube audio via RapidAPI...", flush=True)
+        audio_path = os.path.join(task_dir, "audio.mp3")
         
-        # Inject cookie file path if it exists
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-            ydl_opts["cookiefile"] = COOKIE_FILE_PATH
-            print(f"[{task_id}] Using cookies from {COOKIE_FILE_PATH} for yt-dlp authentication.", flush=True)
-            
-        print(f"[{task_id}] Downloading and transcoding YouTube audio via yt-dlp...", flush=True)
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: download_audio_executor(req.youtubeUrl, ydl_opts))
+        await loop.run_in_executor(None, lambda: download_audio_via_rapidapi(req.youtubeUrl, audio_path))
         
-        audio_path = output_filename + ".mp3"
         if not os.path.exists(audio_path):
-            raise Exception("Audio file was not created by yt-dlp postprocessor.")
+            raise Exception("Audio file was not downloaded by RapidAPI downloader.")
             
-        print(f"[{task_id}] Successfully downloaded and transcoded audio: {audio_path}", flush=True)
+        print(f"[{task_id}] Successfully downloaded audio: {audio_path}", flush=True)
         
         # Verify Gemini API Key exists
         if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
