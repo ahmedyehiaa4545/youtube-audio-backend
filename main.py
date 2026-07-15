@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import shutil
 import asyncio
@@ -63,6 +64,39 @@ def download_audio_executor(youtube_url: str, opts: dict):
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([youtube_url])
 
+# دالة لضبط التوقيتات برمجياً (رياضياً)
+def adjust_timestamps(text: str, offset_minutes: int) -> str:
+    if offset_minutes == 0:
+        return text
+
+    offset_seconds = offset_minutes * 60
+
+    def shift_time(time_str):
+        parts = list(map(int, time_str.split(':')))
+        if len(parts) == 2: # MM:SS
+            total_sec = parts[0] * 60 + parts[1] + offset_seconds
+        elif len(parts) == 3: # HH:MM:SS
+            total_sec = parts[0] * 3600 + parts[1] * 60 + parts[2] + offset_seconds
+        else:
+            return time_str
+
+        h = total_sec // 3600
+        m = (total_sec % 3600) // 60
+        s = total_sec % 60
+
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        else:
+            return f"{m:02d}:{s:02d}"
+
+    def repl(match):
+        start = shift_time(match.group(1))
+        end = shift_time(match.group(2))
+        return f"[{start} -> {end}]"
+
+    pattern = r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*->\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]'
+    return re.sub(pattern, repl, text)
+
 def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: int = 7) -> str:
     genai.configure(api_key=api_key)
     # Use the model requested by the user
@@ -118,7 +152,9 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
 
             print("✅ تم تفريغ الجزء.", flush=True)
 
-            full_transcription += response.text + "\n\n"
+            # تعديل التوقيتات برمجياً
+            adjusted_text = adjust_timestamps(response.text, idx * chunk_minutes)
+            full_transcription += "\n" + adjusted_text
 
         except Exception as e:
             print(f"❌ خطأ في تفريغ الجزء {idx + 1}: {e}", flush=True)
@@ -137,7 +173,7 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
                 except:
                     pass
 
-    return full_transcription
+    return full_transcription.strip()
 
 def clean_temp_dir(path: str):
     """Clean up the temporary directory after some delay or on request"""
