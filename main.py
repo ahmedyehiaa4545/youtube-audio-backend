@@ -453,11 +453,35 @@ def cleanup_old_files():
 
 threading.Thread(target=cleanup_old_files, daemon=True).start()
 
+def get_cookie_header_from_file(cookie_file_path: str) -> str:
+    if not os.path.exists(cookie_file_path) or os.path.getsize(cookie_file_path) == 0:
+        return ""
+    cookies = []
+    try:
+        with open(cookie_file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('#') or not line.strip():
+                    continue
+                parts = line.strip().split('\t')
+                if len(parts) >= 7:
+                    name = parts[5]
+                    value = parts[6]
+                    cookies.append(f"{name}={value}")
+    except Exception as e:
+        print(f"Error parsing cookies file: {e}", flush=True)
+    return "; ".join(cookies)
+
 def get_ffmpeg_headers(format_dict) -> str:
     headers = format_dict.get('http_headers', {})
     header_str = ""
     for k, v in headers.items():
         header_str += f"{k}: {v}\r\n"
+    
+    # Append Cookie header manually from file if present in the tmp folder
+    cookie_str = get_cookie_header_from_file(COOKIE_FILE_PATH)
+    if cookie_str and "Cookie:" not in header_str:
+        header_str += f"Cookie: {cookie_str}\r\n"
+        
     return header_str
 
 @app.post("/api/cut")
