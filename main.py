@@ -526,6 +526,17 @@ def get_ffmpeg_headers(format_dict) -> str:
         
     return header_str
 
+def format_seconds_to_time_str(seconds: float) -> str:
+    """Format float seconds into HH:MM:SS.mmm format for precise clipping"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds % 1) * 1000))
+    if ms == 1000:
+        s += 1
+        ms = 0
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
 @app.post("/api/cut")
 def cut_video(req: CutRequest):
     if req.quality not in [360, 480, 720, 1080, 1440, 2160]:
@@ -540,20 +551,31 @@ def cut_video(req: CutRequest):
     if start_sec >= end_sec:
         raise HTTPException(400, "start_time must be less than end_time")
 
-    duration_sec = end_sec - start_sec
+    # تمديد مدة التحميل والقطع بمقدار 1.5 ثانية من النهاية لعمل تأثير التلاشي عليها
+    # وتقليص تأثير التلاشي في البداية ليكون خفيفاً جداً لكي لا يضيع أول الكلام
+    end_extension = 1.5
+    fade_in_duration = 0.2
+    fade_out_duration = 1.5
+    
+    extended_end_sec = end_sec + end_extension
+    start_time_str = format_seconds_to_time_str(start_sec)
+    extended_end_time_str = format_seconds_to_time_str(extended_end_sec)
+    
+    original_duration_sec = end_sec - start_sec
+
     file_id = str(uuid.uuid4())[:8]
     temp_raw_path = os.path.join(TEMP_DIR, f"{file_id}_raw.mp4")
     output_path = os.path.join(TEMP_DIR, f"{file_id}.mp4")
 
     # تشغيل أمر yt-dlp للتحميل والقص مباشرة لتفادي مشاكل الـ 403 وحظر يوتيوب
-    print(f"🎬 Downloading and cutting segment: {req.start_time} to {req.end_time} using direct YouTube link...", flush=True)
+    print(f"🎬 Downloading and cutting segment: {start_time_str} to {extended_end_time_str} using direct YouTube link...", flush=True)
     start_time_proc = time.time()
     
     ytdl_cmd = [
         'yt-dlp',
         '--quiet', '--no-warnings',
         '--no-playlist',
-        '--download-sections', f"*{req.start_time}-{req.end_time}",
+        '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
         '--force-keyframes-at-cuts',
         '-f', f"bestvideo[height<={req.quality}]+bestaudio/best[height<={req.quality}]/best",
         '--merge-output-format', 'mp4',
@@ -581,13 +603,13 @@ def cut_video(req: CutRequest):
 
     # تطبيق الفلاتر الصوتية (تخفيت الصوت في البداية والنهاية وزيادة الصوت بنسبة 50%)
     fade_applied = False
-    fade_duration = 1.0
-    start_fade_out = max(0.0, duration_sec - fade_duration)
+    # يبدأ التلاشي النهائي (Fade Out) عند نهاية المقطع المحدد أصلياً (ثانية 0 إلى original_duration_sec لا يتأثران، والتلاشي يتم في الـ 1.5 ثانية الإضافية)
+    start_fade_out = original_duration_sec
     
     ffmpeg_cmd = [
         'ffmpeg', '-y',
         '-i', temp_raw_path,
-        '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_duration},afade=t=out:st={start_fade_out}:d={fade_duration}[a]",
+        '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
         '-map', '0:v', '-map', '[a]',
         '-c:v', 'copy',
         '-c:a', 'aac', '-b:a', '192k',
