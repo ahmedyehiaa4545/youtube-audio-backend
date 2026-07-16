@@ -507,114 +507,45 @@ def cut_video(req: CutRequest):
     if start_sec >= end_sec:
         raise HTTPException(400, "start_time must be less than end_time")
 
-    duration_sec = end_sec - start_sec
     file_id = str(uuid.uuid4())[:8]
     output_path = os.path.join(TEMP_DIR, f"{file_id}.mp4")
 
-    # 1. تهيئة خيارات استخراج المعلومات من yt-dlp لتفادي الحظر
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'source_address': '0.0.0.0',
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
-        }
-    }
-
-    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-        ydl_opts['cookiefile'] = COOKIE_FILE_PATH
-
-    print(f"⏳ Extracting stream URLs for quality {req.quality}p...", flush=True)
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(req.url, download=False)
-    except Exception as e:
-        raise HTTPException(500, f"Failed to extract video info: {str(e)}")
-
-    # 2. تصفية واختيار بث الفيديو المناسب (منطق كود العميل)
-    video_formats = [
-        f for f in info.get('formats', [])
-        if f.get('vcodec') != 'none'
-        and f.get('acodec') == 'none'
-        and f.get('ext') == 'mp4'
-        and (f.get('height', 0) <= req.quality)
-    ]
-    video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
-
-    # اختيار أعلى جودة mp4 متاحة كبديل إن لم يجد المطلوب
-    if not video_formats:
-        print("⚠️ No matching MP4 format found. Falling back to any MP4 video stream.", flush=True)
-        video_formats = [
-            f for f in info.get('formats', [])
-            if f.get('vcodec') != 'none'
-            and f.get('acodec') == 'none'
-            and f.get('ext') == 'mp4'
-        ]
-        video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
-
-    if not video_formats:
-        raise HTTPException(500, "Could not find a suitable MP4 video stream")
-
-    video_url = video_formats[0]['url']
-    video_headers = get_ffmpeg_headers(video_formats[0])
-    selected_height = video_formats[0].get('height', 0)
-    print(f"🎬 Selected Video Stream: {selected_height}p", flush=True)
-
-    # 3. تصفية واختيار بث الصوت بأعلى جودة
-    audio_formats = [
-        f for f in info.get('formats', [])
-        if f.get('acodec') != 'none'
-        and f.get('vcodec') == 'none'
-    ]
-    audio_formats.sort(key=lambda x: x.get('abr', 0), reverse=True)
-
-    if not audio_formats:
-        raise HTTPException(500, "Could not find a suitable audio stream")
-
-    audio_url = audio_formats[0]['url']
-    audio_headers = get_ffmpeg_headers(audio_formats[0])
-
-    # 4. تشغيل المعالجة والقص عبر ffmpeg باستخدام المعاملات الموفرة للموارد والـ Headers لتفادي 403
-    print(f"🎬 Processing segment: {req.start_time} to {req.end_time}...", flush=True)
+    # تشغيل أمر yt-dlp للتحميل والقص مباشرة لتفادي مشاكل الـ 403 وحظر يوتيوب
+    print(f"🎬 Downloading and cutting segment: {req.start_time} to {req.end_time} using direct YouTube link...", flush=True)
     start_time_proc = time.time()
     
-    ffmpeg_cmd = ['ffmpeg', '-y']
-    if video_headers:
-        ffmpeg_cmd.extend(['-headers', video_headers])
-    ffmpeg_cmd.extend(['-ss', str(start_sec), '-i', video_url])
+    ytdl_cmd = [
+        'yt-dlp',
+        '--quiet', '--no-warnings',
+        '--no-playlist',
+        '--download-sections', f"*{req.start_time}-{req.end_time}",
+        '--force-keyframes-at-cuts',
+        '-f', f"bestvideo[height<={req.quality}][ext=mp4]+bestaudio[ext=m4a]/best[height<={req.quality}][ext=mp4]/best",
+        '--merge-output-format', 'mp4',
+        '-o', output_path
+    ]
 
-    if audio_headers:
-        ffmpeg_cmd.extend(['-headers', audio_headers])
-    ffmpeg_cmd.extend(['-ss', str(start_sec), '-i', audio_url])
+    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+        ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
 
-    ffmpeg_cmd.extend([
-        '-t', str(duration_sec),
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',   # ultrafast يقلل استهلاك الرام لـ 150MB فقط ويمنع الـ OOM
-        '-crf', '20',             # جودة عالية جداً وصورة ممتازة
-        '-threads', '1',          # خيط معالجة واحد لمنع تضخم الرام في Railway
-        '-c:a', 'aac', '-b:a', '192k',
-        '-movflags', '+faststart',
-        output_path
-    ])
+    ytdl_cmd.append(req.url)
 
-    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+    result = subprocess.run(ytdl_cmd, capture_output=True, text=True)
     elapsed = time.time() - start_time_proc
 
     if result.returncode != 0:
         if os.path.exists(output_path):
             try: os.remove(output_path)
             except: pass
-        # Clean up the output to return only the last 5 lines of error for better readability
         err_lines = result.stderr.strip().split('\n')
         last_err_lines = "\n".join(err_lines[-5:]) if len(err_lines) > 5 else result.stderr
-        raise HTTPException(500, f"FFmpeg processing failed: {last_err_lines}")
+        raise HTTPException(500, f"Cutting failed: {last_err_lines}")
 
     if not os.path.exists(output_path):
         raise HTTPException(500, "Output MP4 file was not generated")
 
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    print(f"✅ Success! {size_mb:.2f}MB | {elapsed:.1f}s | {selected_height}p MP4", flush=True)
+    print(f"✅ Success! {size_mb:.2f}MB | {elapsed:.1f}s | {req.quality}p MP4", flush=True)
 
     return FileResponse(
         output_path,
