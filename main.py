@@ -64,8 +64,8 @@ class DownloadRequest(BaseModel):
 
 class ShortSuggestion(BaseModel):
     title: str = Field(description="عنوان جذاب ومثير للمقطع القصير")
-    start_time: str = Field(description="توقيت بداية المقطع بالصيغة MM:SS أو HH:MM:SS بدقة من النص")
-    end_time: str = Field(description="توقيت نهاية المقطع بالصيغة MM:SS أو HH:MM:SS بدقة من النص")
+    start_time: str = Field(description="توقيت بداية المقطع بصيغة اليوتيوب الكاملة HH:MM:SS (مثال: 00:01:15) بدقة من النص")
+    end_time: str = Field(description="توقيت نهاية المقطع بصيغة اليوتيوب الكاملة HH:MM:SS (مثال: 00:01:45) بدقة من النص")
     script: str = Field(description="النص الكامل للمقطع القصير كما ورد في التفريغ")
     hook: str = Field(description="الجملة أو الفكرة الافتتاحية الجذابة (الخطاف) في أول 3 ثوانٍ")
 
@@ -99,6 +99,17 @@ def parse_time_to_seconds(time_str: str) -> float:
         return float(m) * 60 + float(s)
     else:
         raise ValueError(f"Invalid time format: {time_str}")
+
+def normalize_time_str(time_str: str) -> str:
+    """Normalize any time format (HH:MM:SS, MM:SS, raw seconds) to standard HH:MM:SS format"""
+    try:
+        seconds = parse_time_to_seconds(time_str)
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    except Exception:
+        return time_str
 
 def extract_video_id(url: str) -> str | None:
     pattern = r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})'
@@ -389,11 +400,12 @@ async def suggest_shorts(req: SuggestShortsRequest):
             "أنت خبير محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
             f"قم بتحليل النص المفرغ التالي (الذي يحتوي على توقيتات دقيقة)، واستخرج منه أفضل {req.numShorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
             "شروط استخراج كل مقطع:\n"
-            "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة in النص المرفق. لا تخترع توقيتات جديدة.\n"
-            "2. يجب أن تتراوح مدة كل مقطع بين 15 ثانية إلى 60 ثانية تقريباً.\n"
-            "3. يجب تحديد 'الخطاف' (Hook) وهو أول جملة أو فكرة تشد المشاهد في أول 3 ثوانٍ.\n"
-            "4. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
-            "5. صياغة عنوان جذاب جداً ومثير للاهتمام (Catchy Title) لكل مقطع.\n\n"
+            "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق. لا تخترع توقيتات جديدة.\n"
+            "2. يجب كتابة أوقات البداية والنهاية بصيغة اليوتيوب الكاملة HH:MM:SS (مثال: 00:01:15).\n"
+            "3. يجب أن تتراوح مدة كل مقطع بين 15 ثانية إلى 60 ثانية تقريباً.\n"
+            "4. يجب تحديد 'الخطاف' (Hook) وهو أول جملة أو فكرة تشد المشاهد في أول 3 ثوانٍ.\n"
+            "5. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
+            "6. صياغة عنوان جذاب جداً ومثير للاهتمام (Catchy Title) لكل مقطع.\n\n"
             "النص المفرغ المراد تحليله:\n"
             f"{req.transcription}"
         )
@@ -404,9 +416,13 @@ async def suggest_shorts(req: SuggestShortsRequest):
         import json
         try:
             shorts_data = json.loads(response.text)
+            shorts_list = shorts_data.get("shorts", [])
+            for s in shorts_list:
+                s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"))
+                s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"))
             return {
                 "status": "success",
-                "shorts": shorts_data.get("shorts", [])
+                "shorts": shorts_list
             }
         except Exception as parse_err:
             print(f"Failed to parse Gemini JSON: {parse_err}. Raw response: {response.text}", flush=True)
@@ -436,6 +452,13 @@ def cleanup_old_files():
         time.sleep(60)
 
 threading.Thread(target=cleanup_old_files, daemon=True).start()
+
+def get_ffmpeg_headers(format_dict) -> str:
+    headers = format_dict.get('http_headers', {})
+    header_str = ""
+    for k, v in headers.items():
+        header_str += f"{k}: {v}\r\n"
+    return header_str
 
 @app.post("/api/cut")
 def cut_video(req: CutRequest):
@@ -500,6 +523,7 @@ def cut_video(req: CutRequest):
         raise HTTPException(500, "Could not find a suitable MP4 video stream")
 
     video_url = video_formats[0]['url']
+    video_headers = get_ffmpeg_headers(video_formats[0])
     selected_height = video_formats[0].get('height', 0)
     print(f"🎬 Selected Video Stream: {selected_height}p", flush=True)
 
@@ -515,15 +539,22 @@ def cut_video(req: CutRequest):
         raise HTTPException(500, "Could not find a suitable audio stream")
 
     audio_url = audio_formats[0]['url']
+    audio_headers = get_ffmpeg_headers(audio_formats[0])
 
-    # 4. تشغيل المعالجة والقص عبر ffmpeg باستخدام المعاملات الموفرة للموارد
+    # 4. تشغيل المعالجة والقص عبر ffmpeg باستخدام المعاملات الموفرة للموارد والـ Headers لتفادي 403
     print(f"🎬 Processing segment: {req.start_time} to {req.end_time}...", flush=True)
     start_time_proc = time.time()
     
-    ffmpeg_cmd = [
-        'ffmpeg', '-y',
-        '-ss', str(start_sec), '-i', video_url,
-        '-ss', str(start_sec), '-i', audio_url,
+    ffmpeg_cmd = ['ffmpeg', '-y']
+    if video_headers:
+        ffmpeg_cmd.extend(['-headers', video_headers])
+    ffmpeg_cmd.extend(['-ss', str(start_sec), '-i', video_url])
+
+    if audio_headers:
+        ffmpeg_cmd.extend(['-headers', audio_headers])
+    ffmpeg_cmd.extend(['-ss', str(start_sec), '-i', audio_url])
+
+    ffmpeg_cmd.extend([
         '-t', str(duration_sec),
         '-c:v', 'libx264',
         '-preset', 'ultrafast',   # ultrafast يقلل استهلاك الرام لـ 150MB فقط ويمنع الـ OOM
@@ -532,7 +563,7 @@ def cut_video(req: CutRequest):
         '-c:a', 'aac', '-b:a', '192k',
         '-movflags', '+faststart',
         output_path
-    ]
+    ])
 
     result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
     elapsed = time.time() - start_time_proc
