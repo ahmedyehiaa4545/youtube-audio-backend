@@ -64,8 +64,8 @@ class DownloadRequest(BaseModel):
 
 class ShortSuggestion(BaseModel):
     title: str = Field(description="عنوان جذاب ومثير للمقطع القصير")
-    start_time: str = Field(description="توقيت بداية المقطع بصيغة اليوتيوب الكاملة HH:MM:SS (مثال: 00:01:15) بدقة من النص")
-    end_time: str = Field(description="توقيت نهاية المقطع بصيغة اليوتيوب الكاملة HH:MM:SS (مثال: 00:01:45) بدقة من النص")
+    start_time: str = Field(description="توقيت بداية المقطع كما ورد في النص المفرغ تماماً (مثال: 05:47)")
+    end_time: str = Field(description="توقيت نهاية المقطع كما ورد في النص المفرغ تماماً (مثال: 06:02)")
     script: str = Field(description="النص الكامل للمقطع القصير كما ورد في التفريغ")
     hook: str = Field(description="الجملة أو الفكرة الافتتاحية الجذابة (الخطاف) في أول 3 ثوانٍ")
 
@@ -100,9 +100,41 @@ def parse_time_to_seconds(time_str: str) -> float:
     else:
         raise ValueError(f"Invalid time format: {time_str}")
 
-def normalize_time_str(time_str: str) -> str:
-    """Normalize any time format (HH:MM:SS, MM:SS, raw seconds) to standard HH:MM:SS format"""
+def get_max_transcription_seconds(transcription: str) -> float:
+    """Scan transcription to find the maximum timestamp in it"""
+    pattern = r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*->\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]'
+    matches = re.findall(pattern, transcription)
+    max_secs = 0.0
+    for start, end in matches:
+        try:
+            max_secs = max(max_secs, parse_time_to_seconds(start), parse_time_to_seconds(end))
+        except:
+            pass
+    return max_secs
+
+def normalize_time_str(time_str: str, max_secs: float = 0.0) -> str:
+    """Normalize any time format (HH:MM:SS, MM:SS, raw seconds) to standard HH:MM:SS format.
+    If the parsed seconds exceed max_secs, corrects common AI mapping errors (e.g. HH:MM:00 -> 00:HH:MM).
+    """
     try:
+        # Detect and fix mapping error if max_secs is provided
+        parts = time_str.split(':')
+        if max_secs > 0 and len(parts) == 3:
+            try:
+                h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+                parsed_secs = h * 3600 + m * 60 + s
+                # If parsed duration is way too long, try shifting right
+                if parsed_secs > max_secs * 1.2:
+                    shifted_secs = h * 60 + m
+                    if shifted_secs <= max_secs:
+                        seconds = shifted_secs
+                        h_new = int(seconds // 3600)
+                        m_new = int((seconds % 3600) // 60)
+                        s_new = int(seconds % 60)
+                        return f"{h_new:02d}:{m_new:02d}:{s_new:02d}"
+            except Exception:
+                pass
+
         seconds = parse_time_to_seconds(time_str)
         h = int(seconds // 3600)
         m = int((seconds % 3600) // 60)
@@ -401,7 +433,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
             f"قم بتحليل النص المفرغ التالي (الذي يحتوي على توقيتات دقيقة)، واستخرج منه أفضل {req.numShorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
             "شروط استخراج كل مقطع:\n"
             "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق. لا تخترع توقيتات جديدة.\n"
-            "2. يجب كتابة أوقات البداية والنهاية بصيغة اليوتيوب الكاملة HH:MM:SS (مثال: 00:01:15).\n"
+            "2. اكتب أوقات البداية والنهاية كما هي مكتوبة في النص المفرغ تماماً دون أي تعديل أو تحويل (مثال: 05:47 أو 12:30).\n"
             "3. يجب أن تتراوح مدة كل مقطع بين 15 ثانية إلى 60 ثانية تقريباً.\n"
             "4. يجب تحديد 'الخطاف' (Hook) وهو أول جملة أو فكرة تشد المشاهد في أول 3 ثوانٍ.\n"
             "5. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
@@ -417,9 +449,10 @@ async def suggest_shorts(req: SuggestShortsRequest):
         try:
             shorts_data = json.loads(response.text)
             shorts_list = shorts_data.get("shorts", [])
+            max_secs = get_max_transcription_seconds(req.transcription)
             for s in shorts_list:
-                s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"))
-                s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"))
+                s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
+                s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
             return {
                 "status": "success",
                 "shorts": shorts_list
