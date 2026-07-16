@@ -16,6 +16,8 @@ import google.generativeai as genai
 from pydub import AudioSegment
 import subprocess
 
+TASKS = {}
+
 app = FastAPI(title="YouTube Audio Downloader API", description="Standalone API for downloading and transcribing audio from YouTube using Gemini + Deno + Cookies + yt-dlp")
 
 # Enable CORS for all origins so that Netlify/React frontends can consume the API
@@ -261,13 +263,15 @@ def adjust_timestamps(text: str, offset_minutes: int) -> str:
     
     return text
 
-def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: int = 7) -> str:
+def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: int = 7, task_id: str = None) -> str:
     genai.configure(api_key=api_key)
     # Use the model requested by the user
     selected_model = "gemini-3.1-flash-lite"
     full_transcription = ""
 
     print(f"🟢 النموذج المستخدم: {selected_model}", flush=True)
+    if task_id and task_id in TASKS:
+        TASKS[task_id]["progress"] = "تقسيم ملف الصوت لتفادي استهلاك الذاكرة..."
 
     # Split audio into chunks using ffmpeg to avoid loading the entire file into memory (OOM crash)
     dir_name = os.path.dirname(audio_path)
@@ -301,9 +305,14 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
     chunk_files.sort(key=get_chunk_idx)
 
     print(f"[+] تم تقسيم الصوت إلى {len(chunk_files)} أجزاء.", flush=True)
+    if task_id and task_id in TASKS:
+        TASKS[task_id]["progress"] = f"تم تقسيم الصوت إلى {len(chunk_files)} أجزاء. جاري بدء تفريغها..."
 
     for idx, chunk_path in enumerate(chunk_files):
-        print(f"\n[*] معالجة الجزء {idx + 1}/{len(chunk_files)}", flush=True)
+        msg = f"معالجة الجزء {idx + 1}/{len(chunk_files)}: جاري الرفع إلى Gemini..."
+        print(f"\n[*] {msg}", flush=True)
+        if task_id and task_id in TASKS:
+            TASKS[task_id]["progress"] = msg
 
         uploaded_file = None
 
@@ -319,7 +328,10 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
                 print("❌ فشل رفع الملف.", flush=True)
                 continue
 
-            print("   - جاري إرسال الطلب إلى Gemini...", flush=True)
+            msg = f"معالجة الجزء {idx + 1}/{len(chunk_files)}: جاري التحليل والتفريغ..."
+            print(f"   - {msg}", flush=True)
+            if task_id and task_id in TASKS:
+                TASKS[task_id]["progress"] = msg
 
             model = genai.GenerativeModel(selected_model)
 
@@ -383,51 +395,86 @@ def read_root():
         "files_in_dir": os.listdir(".")
     }
 
+def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key: str, task_dir: str):
+    # To prevent memory leak, keep TASKS size under control
+    if len(TASKS) > 200:
+        keys_to_remove = list(TASKS.keys())[:50]
+        for k in keys_to_remove:
+            TASKS.pop(k, None)
+
+    try:
+        audio_path = os.path.join(task_dir, "audio.mp3")
+        
+        print(f"[{task_id}] Background: Downloading YouTube audio via RapidAPI...", flush=True)
+        download_audio_via_rapidapi(youtube_url, audio_path)
+        
+        if not os.path.exists(audio_path):
+            raise Exception("فشل تحميل ملف الصوت من السيرفر.")
+            
+        print(f"[{task_id}] Background: Transcribing audio with Gemini...", flush=True)
+        transcription_text = transcribe_audio_with_gemini(
+            audio_path=audio_path,
+            api_key=gemini_api_key,
+            task_id=task_id
+        )
+        
+        # Success
+        TASKS[task_id].update({
+            "status": "success",
+            "progress": "اكتمل بنجاح!",
+            "audioUrl": f"public/temp_{task_id}/audio.mp3",
+            "transcription": transcription_text
+        })
+        
+    except Exception as e:
+        clean_temp_dir(task_dir)
+        print(f"[{task_id}] Background process failed: {e}", flush=True)
+        TASKS[task_id].update({
+            "status": "failed",
+            "progress": f"فشل: {str(e)}",
+            "error": str(e)
+        })
+
 @app.post("/api/transcribe-gemini")
 async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTasks):
+    if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
+        raise HTTPException(status_code=400, detail="Gemini API key is missing or invalid.")
+        
     task_id = str(uuid.uuid4())
     task_dir = os.path.join(PUBLIC_DIR, f"temp_{task_id}")
     os.makedirs(task_dir, exist_ok=True)
     
-    try:
-        output_filename = os.path.join(task_dir, "audio")
-        
-        print(f"[{task_id}] Downloading YouTube audio via RapidAPI...", flush=True)
-        audio_path = os.path.join(task_dir, "audio.mp3")
-        
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: download_audio_via_rapidapi(req.youtubeUrl, audio_path))
-        
-        if not os.path.exists(audio_path):
-            raise Exception("Audio file was not downloaded by RapidAPI downloader.")
-            
-        print(f"[{task_id}] Successfully downloaded audio: {audio_path}", flush=True)
-        
-        # Verify Gemini API Key exists
-        if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
-            raise Exception("Gemini API key is missing or invalid.")
-            
-        print(f"[{task_id}] Transcribing audio with Gemini...", flush=True)
-        # Call the transcription function
-        loop = asyncio.get_event_loop()
-        transcription_text = await loop.run_in_executor(
-            None, 
-            lambda: transcribe_audio_with_gemini(audio_path, req.geminiApiKey)
-        )
-        
-        # Schedule cleanup in the background after 10 minutes to save disk space
-        background_tasks.add_task(schedule_dir_cleanup, task_dir, 600)
-        
-        return {
-            "status": "success",
-            "audioUrl": f"public/temp_{task_id}/audio.mp3",
-            "transcription": transcription_text
-        }
-        
-    except Exception as e:
-        clean_temp_dir(task_dir)
-        print(f"[{task_id}] Failed to process audio: {e}", flush=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    # Initialize task status
+    TASKS[task_id] = {
+        "status": "processing",
+        "progress": "جاري بدء المهمة...",
+        "audioUrl": None,
+        "transcription": None,
+        "error": None
+    }
+    
+    # Run task in background
+    background_tasks.add_task(
+        run_transcription_background, 
+        task_id, 
+        req.youtubeUrl, 
+        req.geminiApiKey, 
+        task_dir
+    )
+    
+    # Schedule cleanup in the background after 20 minutes to save disk space
+    background_tasks.add_task(schedule_dir_cleanup, task_dir, 1200)
+    
+    return {
+        "status": "queued",
+        "taskId": task_id
+    }
+
+@app.get("/api/task-status/{task_id}")
+async def get_task_status(task_id: str):
+    if task_id not in TASKS:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return TASKS[task_id]
 
 @app.post("/api/suggest-shorts")
 async def suggest_shorts(req: SuggestShortsRequest):
