@@ -418,21 +418,27 @@ async def suggest_shorts(req: SuggestShortsRequest):
 
 
 import subprocess
+import threading
 
-TEMP_CUTS_DIR = os.path.abspath("temp_cuts")
-os.makedirs(TEMP_CUTS_DIR, exist_ok=True)
+TEMP_DIR = "/tmp/yt_segments"
+os.makedirs(TEMP_DIR, exist_ok=True)
 
-async def schedule_file_cleanup(filepath: str, delay_seconds: int = 300):
-    await asyncio.sleep(delay_seconds)
-    if os.path.exists(filepath):
-        try:
-            os.remove(filepath)
-            print(f"Cleaned up cut file: {filepath}", flush=True)
-        except Exception as e:
-            print(f"Error cleaning up {filepath}: {e}", flush=True)
+def cleanup_old_files():
+    while True:
+        now = time.time()
+        for f in os.listdir(TEMP_DIR):
+            filepath = os.path.join(TEMP_DIR, f)
+            if os.path.isfile(filepath) and now - os.path.getmtime(filepath) > 600:
+                try:
+                    os.remove(filepath)
+                except:
+                    pass
+        time.sleep(60)
+
+threading.Thread(target=cleanup_old_files, daemon=True).start()
 
 @app.post("/api/cut")
-async def cut_video(req: CutRequest, background_tasks: BackgroundTasks):
+def cut_video(req: CutRequest):
     if req.quality not in [360, 480, 720, 1080, 1440, 2160]:
         raise HTTPException(400, "quality must be 360, 480, 720, 1080, 1440, or 2160")
 
@@ -447,9 +453,9 @@ async def cut_video(req: CutRequest, background_tasks: BackgroundTasks):
 
     duration_sec = end_sec - start_sec
     file_id = str(uuid.uuid4())[:8]
-    output_path = os.path.join(TEMP_CUTS_DIR, f"{file_id}.mp4")
+    output_path = os.path.join(TEMP_DIR, f"{file_id}.mp4")
 
-    # yt-dlp options to extract info without blocking
+    # 1. تهيئة خيارات استخراج المعلومات من yt-dlp لتفادي الحظر
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -464,12 +470,12 @@ async def cut_video(req: CutRequest, background_tasks: BackgroundTasks):
 
     print(f"⏳ Extracting stream URLs for quality {req.quality}p...", flush=True)
     try:
-        loop = asyncio.get_event_loop()
-        info = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(req.url, download=False))
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(req.url, download=False)
     except Exception as e:
         raise HTTPException(500, f"Failed to extract video info: {str(e)}")
 
-    # Filter video formats (MP4, <= quality)
+    # 2. تصفية واختيار بث الفيديو المناسب (منطق كود العميل)
     video_formats = [
         f for f in info.get('formats', [])
         if f.get('vcodec') != 'none'
@@ -479,8 +485,9 @@ async def cut_video(req: CutRequest, background_tasks: BackgroundTasks):
     ]
     video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
 
+    # اختيار أعلى جودة mp4 متاحة كبديل إن لم يجد المطلوب
     if not video_formats:
-        # Fallback to any MP4 video stream
+        print("⚠️ No matching MP4 format found. Falling back to any MP4 video stream.", flush=True)
         video_formats = [
             f for f in info.get('formats', [])
             if f.get('vcodec') != 'none'
@@ -493,8 +500,10 @@ async def cut_video(req: CutRequest, background_tasks: BackgroundTasks):
         raise HTTPException(500, "Could not find a suitable MP4 video stream")
 
     video_url = video_formats[0]['url']
+    selected_height = video_formats[0].get('height', 0)
+    print(f"🎬 Selected Video Stream: {selected_height}p", flush=True)
 
-    # Filter audio formats (best ABR)
+    # 3. تصفية واختيار بث الصوت بأعلى جودة
     audio_formats = [
         f for f in info.get('formats', [])
         if f.get('acodec') != 'none'
@@ -507,7 +516,9 @@ async def cut_video(req: CutRequest, background_tasks: BackgroundTasks):
 
     audio_url = audio_formats[0]['url']
 
+    # 4. تشغيل المعالجة والقص عبر ffmpeg باستخدام المعاملات الموفرة للموارد
     print(f"🎬 Processing segment: {req.start_time} to {req.end_time}...", flush=True)
+    start_time_proc = time.time()
     
     ffmpeg_cmd = [
         'ffmpeg', '-y',
@@ -515,33 +526,35 @@ async def cut_video(req: CutRequest, background_tasks: BackgroundTasks):
         '-ss', str(start_sec), '-i', audio_url,
         '-t', str(duration_sec),
         '-c:v', 'libx264',
-        '-preset', 'ultrafast',   # ultrafast reduces ram to 150mb and prevents OOM
-        '-crf', '20',             # very high quality
-        '-threads', '1',          # one processing thread to prevent ram spikes on Railway
+        '-preset', 'ultrafast',   # ultrafast يقلل استهلاك الرام لـ 150MB فقط ويمنع الـ OOM
+        '-crf', '20',             # جودة عالية جداً وصورة ممتازة
+        '-threads', '1',          # خيط معالجة واحد لمنع تضخم الرام في Railway
         '-c:a', 'aac', '-b:a', '192k',
         '-movflags', '+faststart',
         output_path
     ]
 
-    try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, lambda: subprocess.run(ffmpeg_cmd, capture_output=True, text=True))
-    except Exception as e:
-        raise HTTPException(500, f"FFmpeg execution error: {str(e)}")
+    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+    elapsed = time.time() - start_time_proc
 
     if result.returncode != 0:
         if os.path.exists(output_path):
             try: os.remove(output_path)
             except: pass
-        raise HTTPException(500, f"FFmpeg processing failed: {result.stderr}")
+        # Clean up the output to return only the last 5 lines of error for better readability
+        err_lines = result.stderr.strip().split('\n')
+        last_err_lines = "\n".join(err_lines[-5:]) if len(err_lines) > 5 else result.stderr
+        raise HTTPException(500, f"FFmpeg processing failed: {last_err_lines}")
 
     if not os.path.exists(output_path):
         raise HTTPException(500, "Output MP4 file was not generated")
 
-    background_tasks.add_task(schedule_file_cleanup, output_path, 300)
+    size_mb = os.path.getsize(output_path) / (1024 * 1024)
+    print(f"✅ Success! {size_mb:.2f}MB | {elapsed:.1f}s | {selected_height}p MP4", flush=True)
 
     return FileResponse(
         output_path,
         media_type="video/mp4",
         filename=f"cut_{file_id}.mp4"
     )
+
