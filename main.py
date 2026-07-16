@@ -475,7 +475,16 @@ def get_ffmpeg_headers(format_dict) -> str:
     headers = format_dict.get('http_headers', {})
     header_str = ""
     for k, v in headers.items():
+        if k.lower() == 'referer':
+            continue
         header_str += f"{k}: {v}\r\n"
+    
+    # Enforce Referer header for googlevideo streams to bypass 403 Forbidden
+    header_str += "Referer: https://www.youtube.com/\r\n"
+    
+    # Ensure User-Agent is present
+    if "User-Agent" not in header_str and "user-agent" not in header_str.lower():
+        header_str += "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36\r\n"
     
     # Append Cookie header manually from file if present in the tmp folder
     cookie_str = get_cookie_header_from_file(COOKIE_FILE_PATH)
