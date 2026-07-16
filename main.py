@@ -14,6 +14,7 @@ from typing import List
 import yt_dlp
 import google.generativeai as genai
 from pydub import AudioSegment
+import subprocess
 
 app = FastAPI(title="YouTube Audio Downloader API", description="Standalone API for downloading and transcribing audio from YouTube using Gemini + Deno + Cookies + yt-dlp")
 
@@ -250,13 +251,15 @@ def adjust_timestamps(text: str, offset_minutes: int) -> str:
         else:
             return f"{m:02d}:{s:02d}"
 
-    def repl(match):
-        start = shift_time(match.group(1))
-        end = shift_time(match.group(2))
-        return f"[{start} -> {end}]"
-
-    pattern = r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*->\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]'
-    return re.sub(pattern, repl, text)
+    # أولاً نقوم بضبط التوقيتات ذات المدى (مثل [00:05 -> 00:10])
+    pattern_range = r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*->\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]'
+    text = re.sub(pattern_range, lambda m: f"[{shift_time(m.group(1))} -> {shift_time(m.group(2))}]", text)
+    
+    # ثانياً نقوم بضبط التوقيتات الفردية (مثل [00:00] أو [00:03]) التي قد تخرج أحياناً من الذكاء الاصطناعي
+    pattern_single = r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]'
+    text = re.sub(pattern_single, lambda m: f"[{shift_time(m.group(1))}]", text)
+    
+    return text
 
 def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: int = 7) -> str:
     genai.configure(api_key=api_key)
@@ -266,23 +269,41 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
 
     print(f"🟢 النموذج المستخدم: {selected_model}", flush=True)
 
-    # Load audio file using pydub
-    audio = AudioSegment.from_mp3(audio_path)
-    chunk_length_ms = chunk_minutes * 60 * 1000
+    # Split audio into chunks using ffmpeg to avoid loading the entire file into memory (OOM crash)
+    dir_name = os.path.dirname(audio_path)
+    chunk_pattern = os.path.join(dir_name, "chunk_%d.mp3")
+    segment_time_sec = chunk_minutes * 60
     
-    # Split audio into chunks
-    chunks = []
-    for i in range(0, len(audio), chunk_length_ms):
-        chunks.append(audio[i:i + chunk_length_ms])
+    split_cmd = [
+        'ffmpeg', '-y',
+        '-i', audio_path,
+        '-f', 'segment',
+        '-segment_time', str(segment_time_sec),
+        '-c', 'copy',
+        chunk_pattern
+    ]
+    
+    print("[*] Splitting audio using ffmpeg to prevent OOM...", flush=True)
+    subprocess.run(split_cmd, capture_output=True)
+    
+    import glob
+    chunk_files = glob.glob(os.path.join(dir_name, "chunk_*.mp3"))
+    
+    # Sort chunks numerically based on their index (e.g. chunk_0.mp3, chunk_1.mp3)
+    def get_chunk_idx(filepath):
+        try:
+            basename = os.path.basename(filepath)
+            num_part = basename.split('_')[1].split('.')[0]
+            return int(num_part)
+        except:
+            return 9999
+            
+    chunk_files.sort(key=get_chunk_idx)
 
-    print(f"[+] تم تقسيم الصوت إلى {len(chunks)} أجزاء.", flush=True)
+    print(f"[+] تم تقسيم الصوت إلى {len(chunk_files)} أجزاء.", flush=True)
 
-    for idx, chunk in enumerate(chunks):
-        print(f"\n[*] معالجة الجزء {idx + 1}/{len(chunks)}", flush=True)
-
-        chunk_filename = f"chunk_{idx}_{uuid.uuid4().hex[:6]}.mp3"
-        chunk_path = os.path.join(os.path.dirname(audio_path), chunk_filename)
-        chunk.export(chunk_path, format="mp3")
+    for idx, chunk_path in enumerate(chunk_files):
+        print(f"\n[*] معالجة الجزء {idx + 1}/{len(chunk_files)}", flush=True)
 
         uploaded_file = None
 
