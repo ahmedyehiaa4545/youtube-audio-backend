@@ -411,7 +411,7 @@ def adjust_timestamps(text: str, offset_minutes: int) -> str:
 def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: int = 7, task_id: str = None) -> str:
     genai.configure(api_key=api_key)
     # Use the model requested by the user
-    selected_model = "gemini-3.1-flash-lite"
+    selected_model = "gemini-3.1-flash-lite-preview"
     full_transcription = ""
 
     print(f"🟢 النموذج المستخدم: {selected_model}", flush=True)
@@ -643,7 +643,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
         
         # Use structured JSON outputs with Gemini to guarantee perfect schema match
         model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash-lite",
+            model_name="gemini-3.1-flash-lite-preview",
             generation_config={
                 "response_mime_type": "application/json",
                 "response_schema": ShortsResponse
@@ -783,11 +783,11 @@ def cut_video(req: CutRequest):
     if start_sec >= end_sec:
         raise HTTPException(400, "start_time must be less than end_time")
 
-    # تمديد مدة التحميل والقطع بمقدار 1.20 ثانية من النهاية لعمل تأثير التلاشي عليها
+    # تمديد مدة التحميل والقطع بمقدار 0.75 ثانية من النهاية لعمل تأثير التلاشي عليها
     # وتقليص تأثير التلاشي في البداية ليكون خفيفاً جداً لكي لا يضيع أول الكلام
-    end_extension = 1.20
+    end_extension = 0.75
     fade_in_duration = 0.2
-    fade_out_duration = 1.20
+    fade_out_duration = 0.75
     
     extended_end_sec = end_sec + end_extension
     start_time_str = format_seconds_to_time_str(start_sec)
@@ -835,7 +835,7 @@ def cut_video(req: CutRequest):
 
     # تطبيق الفلاتر الصوتية (تخفيت الصوت في البداية والنهاية وزيادة الصوت بنسبة 50%)
     fade_applied = False
-    # يبدأ التلاشي النهائي (Fade Out) عند نهاية المقطع المحدد أصلياً (ثانية 0 إلى original_duration_sec لا يتأثران، والتلاشي يتم في الـ 1.20 ثانية الإضافية)
+    # يبدأ التلاشي النهائي (Fade Out) عند نهاية المقطع المحدد أصلياً (ثانية 0 إلى original_duration_sec لا يتأثران، والتلاشي يتم في الـ 0.75 ثانية الإضافية)
     start_fade_out = original_duration_sec
     
     ffmpeg_cmd = [
