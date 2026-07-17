@@ -411,7 +411,7 @@ def adjust_timestamps(text: str, offset_minutes: int) -> str:
 def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: int = 7, task_id: str = None) -> str:
     genai.configure(api_key=api_key)
     # Use the model requested by the user
-    selected_model = "gemini-3.1-flash-lite-preview"
+    selected_model = "gemini-3.1-flash-lite"
     full_transcription = ""
 
     print(f"🟢 النموذج المستخدم: {selected_model}", flush=True)
