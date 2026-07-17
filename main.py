@@ -643,7 +643,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
         
         # Use structured JSON outputs with Gemini to guarantee perfect schema match
         model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash-lite",
+            model_name="gemini-2.0-flash-lite",
             generation_config={
                 "response_mime_type": "application/json",
                 "response_schema": ShortsResponse
