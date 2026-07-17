@@ -150,35 +150,43 @@ def parse_transcription_segments(transcription: str):
     """
     Parses transcription text into list of dicts:
     [{"start": float, "end": float, "text": str}]
+    Supports multiple inline timestamps and text before/after them.
     """
     segments = []
-    lines = transcription.strip().split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        # Check range timestamp [start -> end]
-        range_match = re.match(r'^\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*->\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]\s*(.*)$', line)
-        if range_match:
-            try:
-                start_sec = parse_time_to_seconds(range_match.group(1))
-                end_sec = parse_time_to_seconds(range_match.group(2))
-                text = range_match.group(3).strip()
-                segments.append({"start": start_sec, "end": end_sec, "text": text})
-                continue
-            except:
-                pass
-        # Check single timestamp [start]
-        single_match = re.match(r'^\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]\s*(.*)$', line)
-        if single_match:
-            try:
-                start_sec = parse_time_to_seconds(single_match.group(1))
-                text = single_match.group(2).strip()
-                segments.append({"start": start_sec, "end": None, "text": text})
-            except:
-                pass
+    pattern = r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*->\s*(\d{1,2}:\d{2}(?::\d{2})?))?\s*\]'
     
-    # Fill in None end times based on the start time of the next segment
+    matches = list(re.finditer(pattern, transcription))
+    
+    if not matches:
+        return []
+        
+    first_match = matches[0]
+    first_text = transcription[0:first_match.start()].strip()
+    if first_text:
+        segments.append({
+            "start": 0.0,
+            "end": parse_time_to_seconds(first_match.group(1)),
+            "text": first_text
+        })
+        
+    for i, match in enumerate(matches):
+        start_str = match.group(1)
+        end_str = match.group(2)
+        
+        start_sec = parse_time_to_seconds(start_str)
+        end_sec = parse_time_to_seconds(end_str) if end_str else None
+        
+        start_pos = match.end()
+        end_pos = matches[i+1].start() if i + 1 < len(matches) else len(transcription)
+        text = transcription[start_pos:end_pos].strip()
+        text = re.sub(r'\s+', ' ', text)
+        
+        segments.append({
+            "start": start_sec,
+            "end": end_sec,
+            "text": text
+        })
+        
     for i in range(len(segments)):
         if segments[i]["end"] is None:
             if i + 1 < len(segments):
