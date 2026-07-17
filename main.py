@@ -146,6 +146,65 @@ def normalize_time_str(time_str: str, max_secs: float = 0.0) -> str:
     except Exception:
         return time_str
 
+def parse_transcription_segments(transcription: str):
+    """
+    Parses transcription text into list of dicts:
+    [{"start": float, "end": float, "text": str}]
+    """
+    segments = []
+    lines = transcription.strip().split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Check range timestamp [start -> end]
+        range_match = re.match(r'^\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*->\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]\s*(.*)$', line)
+        if range_match:
+            try:
+                start_sec = parse_time_to_seconds(range_match.group(1))
+                end_sec = parse_time_to_seconds(range_match.group(2))
+                text = range_match.group(3).strip()
+                segments.append({"start": start_sec, "end": end_sec, "text": text})
+                continue
+            except:
+                pass
+        # Check single timestamp [start]
+        single_match = re.match(r'^\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]\s*(.*)$', line)
+        if single_match:
+            try:
+                start_sec = parse_time_to_seconds(single_match.group(1))
+                text = single_match.group(2).strip()
+                segments.append({"start": start_sec, "end": None, "text": text})
+            except:
+                pass
+    
+    # Fill in None end times based on the start time of the next segment
+    for i in range(len(segments)):
+        if segments[i]["end"] is None:
+            if i + 1 < len(segments):
+                segments[i]["end"] = segments[i+1]["start"]
+            else:
+                segments[i]["end"] = segments[i]["start"] + 5.0
+                
+    return segments
+
+def rebuild_script_for_short(transcription: str, start_time: str, end_time: str, fallback_script: str) -> str:
+    try:
+        start_sec = parse_time_to_seconds(start_time)
+        end_sec = parse_time_to_seconds(end_time)
+    except Exception:
+        return fallback_script
+
+    segments = parse_transcription_segments(transcription)
+    matching_texts = []
+    
+    for seg in segments:
+        if seg["start"] < (end_sec - 0.01) and seg["end"] > (start_sec + 0.01):
+            matching_texts.append(seg["text"])
+            
+    rebuilt = " ".join(matching_texts).strip()
+    return rebuilt if rebuilt else fallback_script
+
 def extract_video_id(url: str) -> str | None:
     pattern = r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})'
     match = re.search(pattern, url)
@@ -505,7 +564,8 @@ async def suggest_shorts(req: SuggestShortsRequest):
             "3. يجب أن تتراوح مدة كل مقطع بين 15 ثانية إلى 60 ثانية تقريباً.\n"
             "4. يجب تحديد 'الخطاف' (Hook) وهو أول جملة أو فكرة تشد المشاهد في أول 3 ثوانٍ.\n"
             "5. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
-            "6. صياغة عنوان جذاب جداً ومثير للاهتمام (Catchy Title) لكل مقطع.\n\n"
+            "6. صياغة عنوان جذاب جداً ومثير للاهتمام (Catchy Title) لكل مقطع.\n"
+            "7. تنبيه هام جداً للمزامنة وقص الفيديوهات: عند تحديد وقت النهاية (end_time) لمقطع الشورت، احذر أن تدرج في السكريبت (script) أي جملة تبدأ في وقت النهاية أو بعده. فمثلاً، إذا كان وقت النهاية هو 03:06، فإن الجملة التي تبدأ بـ `[03:06]` أو `[03:06 -> 03:12]` تقع بعد وقت النهاية الفعلي للمقطع ولا يجب أن تظهر في السكريبت الخاص بهذا الشورت نهائياً، لأن الفيديو ينتهي عند 03:06 تماماً قبل نطق هذه الجملة.\n\n"
             "النص المفرغ المراد تحليله:\n"
             f"{req.transcription}"
         )
@@ -521,6 +581,15 @@ async def suggest_shorts(req: SuggestShortsRequest):
             for s in shorts_list:
                 s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
                 s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+                
+                # Rebuild/trim script using the normalized times and transcription to guarantee perfect boundary matching!
+                s["script"] = rebuild_script_for_short(
+                    transcription=req.transcription,
+                    start_time=s["start_time"],
+                    end_time=s["end_time"],
+                    fallback_script=s.get("script", "")
+                )
+                
             return {
                 "status": "success",
                 "shorts": shorts_list
@@ -619,11 +688,11 @@ def cut_video(req: CutRequest):
     if start_sec >= end_sec:
         raise HTTPException(400, "start_time must be less than end_time")
 
-    # تمديد مدة التحميل والقطع بمقدار 1.5 ثانية من النهاية لعمل تأثير التلاشي عليها
+    # تمديد مدة التحميل والقطع بمقدار 0.75 ثانية من النهاية لعمل تأثير التلاشي عليها
     # وتقليص تأثير التلاشي في البداية ليكون خفيفاً جداً لكي لا يضيع أول الكلام
-    end_extension = 1.5
+    end_extension = 0.75
     fade_in_duration = 0.2
-    fade_out_duration = 1.5
+    fade_out_duration = 0.75
     
     extended_end_sec = end_sec + end_extension
     start_time_str = format_seconds_to_time_str(start_sec)
@@ -671,7 +740,7 @@ def cut_video(req: CutRequest):
 
     # تطبيق الفلاتر الصوتية (تخفيت الصوت في البداية والنهاية وزيادة الصوت بنسبة 50%)
     fade_applied = False
-    # يبدأ التلاشي النهائي (Fade Out) عند نهاية المقطع المحدد أصلياً (ثانية 0 إلى original_duration_sec لا يتأثران، والتلاشي يتم في الـ 1.5 ثانية الإضافية)
+    # يبدأ التلاشي النهائي (Fade Out) عند نهاية المقطع المحدد أصلياً (ثانية 0 إلى original_duration_sec لا يتأثران، والتلاشي يتم في الـ 0.75 ثانية الإضافية)
     start_fade_out = original_duration_sec
     
     ffmpeg_cmd = [
