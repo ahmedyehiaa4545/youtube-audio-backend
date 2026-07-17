@@ -146,6 +146,84 @@ def normalize_time_str(time_str: str, max_secs: float = 0.0) -> str:
     except Exception:
         return time_str
 
+def convert_single_timestamps_to_ranges(text: str) -> str:
+    """
+    Scans the transcription text line by line.
+    If a line has a single timestamp [MM:SS] Text, it converts it to [MM:SS -> next_MM:SS] Text
+    based on the start time of the next segment.
+    """
+    lines = text.split('\n')
+    
+    parsed_segments = []
+    for line in lines:
+        trimmed = line.strip()
+        if not trimmed:
+            parsed_segments.append({"type": "empty", "content": line})
+            continue
+            
+        range_match = re.match(r'^\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*->\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]\s*(.*)$', trimmed)
+        if range_match:
+            parsed_segments.append({
+                "type": "range",
+                "start_str": range_match.group(1),
+                "end_str": range_match.group(2),
+                "text": range_match.group(3),
+                "raw_line": line
+            })
+            continue
+            
+        single_match = re.match(r'^\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]\s*(.*)$', trimmed)
+        if single_match:
+            parsed_segments.append({
+                "type": "single",
+                "start_str": single_match.group(1),
+                "text": single_match.group(2),
+                "raw_line": line
+            })
+            continue
+            
+        parsed_segments.append({"type": "text", "content": line})
+        
+    for idx, seg in enumerate(parsed_segments):
+        if seg["type"] == "single":
+            next_start_str = None
+            for lookahead_idx in range(idx + 1, len(parsed_segments)):
+                lookahead_seg = parsed_segments[lookahead_idx]
+                if lookahead_seg["type"] in ["range", "single"]:
+                    next_start_str = lookahead_seg["start_str"]
+                    break
+            
+            if next_start_str:
+                seg["type"] = "range"
+                seg["end_str"] = next_start_str
+            else:
+                try:
+                    start_sec = parse_time_to_seconds(seg["start_str"])
+                    end_sec = start_sec + 4.0
+                    h = int(end_sec // 3600)
+                    m = int((end_sec % 3600) // 60)
+                    s = int(end_sec % 60)
+                    if h > 0:
+                        seg["end_str"] = f"{h:02d}:{m:02d}:{s:02d}"
+                    else:
+                        seg["end_str"] = f"{m:02d}:{s:02d}"
+                    seg["type"] = "range"
+                except:
+                    pass
+                    
+    rebuilt_lines = []
+    for seg in parsed_segments:
+        if seg["type"] == "empty":
+            rebuilt_lines.append(seg["content"])
+        elif seg["type"] == "text":
+            rebuilt_lines.append(seg["content"])
+        elif seg["type"] == "range":
+            rebuilt_lines.append(f"[{seg['start_str']} -> {seg['end_str']}] {seg['text']}")
+        elif seg["type"] == "single":
+            rebuilt_lines.append(f"[{seg['start_str']}] {seg['text']}")
+            
+    return "\n".join(rebuilt_lines)
+
 def parse_transcription_segments(transcription: str):
     """
     Parses transcription text into list of dicts:
@@ -403,10 +481,17 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
             model = genai.GenerativeModel(selected_model)
 
             prompt = (
-                "اسمع الملف الصوتي المرفق بتركيز. "
-                "قم بتفريغ المحتوى كاملاً باللغة العربية مع توقيتات دقيقة تبدأ من [00:00]. "
-                "لا تلخص واكتب كل ما تسمعه.\n\n"
-                "تنسيق المخرجات المطلوب حصراً:\n[00:05 -> 00:10] النص العربي هنا"
+                "أنت خبير تفريغ نصوص صوتية محترف. "
+                "قم بالاستماع للملف الصوتي المرفق بتركيز شديد وتفريغ كل كلمة بدقة باللغة العربية دون تلخيص أو إغفال لأي جملة.\n\n"
+                "⚠️ شروط التوقيت الحاسمة والمطلوبة حصراً:\n"
+                "1. يجب كتابة كل جملة أو فكرة في سطر مستقل يبدأ بنطاق زمني بصيغة: `[البداية -> النهاية] النص العربي`.\n"
+                "2. يمنع منعاً باتاً استخدام توقيت فردي مثل `[00:05]`، بل يجب تحديد وقت البداية ووقت النهاية للجملة بدقة (مثال: `[00:05 -> 00:10]`).\n"
+                "3. احرص على أن تكون الفترات الزمنية قصيرة ومحددة (تتراوح بين ثانيتين إلى 7 ثوانٍ كحد أقصى لكل سطر) لضمان أعلى دقة مزامنة ممكنة.\n"
+                "4. ابدأ التوقيت من [00:00] بالنسبة للملف المرفق.\n\n"
+                "أمثلة للتنسيق المطلوب:\n"
+                "[00:00 -> 00:04] أهلاً بكم في هذه الحلقة الجديدة.\n"
+                "[00:04 -> 00:09] اليوم سنتحدث عن أسرار البحار والمحيطات.\n"
+                "[00:09 -> 00:13] البحر مليء بالمفاجآت العجيبة."
             )
 
             response = model.generate_content([prompt, uploaded_file])
@@ -415,6 +500,8 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
 
             # تعديل التوقيتات برمجياً
             adjusted_text = adjust_timestamps(response.text, idx * chunk_minutes)
+            # تحويل أي توقيتات فردية متبقية إلى نطاقات زمنية لضمان دقة القص والسكريبت 100%
+            adjusted_text = convert_single_timestamps_to_ranges(adjusted_text)
             full_transcription += "\n" + adjusted_text
 
         except Exception as e:
