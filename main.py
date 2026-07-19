@@ -706,6 +706,91 @@ async def suggest_shorts(req: SuggestShortsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
+    if len(TASKS) > 200:
+        keys_to_remove = list(TASKS.keys())[:50]
+        for k in keys_to_remove:
+            TASKS.pop(k, None)
+
+    try:
+        TASKS[task_id] = {"status": "processing", "progress": f"✨ جاري تحليل النص بالذكاء الاصطناعي واقتراح {req.numShorts} مقاطع Shorts..."}
+
+        genai.configure(api_key=req.geminiApiKey)
+        model = genai.GenerativeModel(
+            model_name="gemini-3-flash-preview",
+            generation_config={
+                "response_mime_type": "application/json",
+                "response_schema": ShortsResponse
+            }
+        )
+
+        prompt = (
+            "أنت خبير محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
+            f"قم بتحليل النص المفرغ التالي (الذي يحتوي على توقيتات دقيقة)، واستخرج منه أفضل {req.numShorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
+            "شروط استخراج كل مقطع:\n"
+            "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق. لا تخترع توقيتات جديدة.\n"
+            "2. اكتب أوقات البداية والنهاية كما هي مكتوبة في النص المفرغ تماماً دون أي تعديل أو تحويل (مثال: 05:47 أو 12:30).\n"
+            "3. يجب أن تتراوح مدة كل مقطع بين 30 ثانية إلى 120 ثانية (دقيقتين كحد أقصى) إذا احتاج المقطع ذلك لاكتمال المعنى والمعالجة.\n"
+            "4. يجب تحديد 'الخطاف' (Hook) وهو أول جملة نطقها المتحدث في أول 3 ثوانٍ بنفس المقطع تماماً وبنفس الكلمات المكتوبة في السكريبت دون أي تلخيص أو تغيير.\n"
+            "5. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
+            "6. صياغة عنوان جذاب جداً ومثير للاهتمام (Catchy Title) لكل مقطع.\n"
+            "7. تنبيه هام جداً للمزامنة وقص الفيديوهات: عند تحديد وقت النهاية (end_time) لمقطع الشورت، احذر أن تدرج في السكريبت (script) أي جملة تبدأ في وقت النهاية أو بعده. فمثلاً، إذا كان وقت النهاية هو 03:06، فإن الجملة التي تبدأ بـ `[03:06]` أو `[03:06 -> 03:12]` تقع بعد وقت النهاية الفعلي للمقطع ولا يجب أن تظهر في السكريبت الخاص بهذا الشورت نهائياً، لأن الفيديو ينتهي عند 03:06 تماماً قبل نطق هذه الجملة.\n\n"
+            "النص المفرغ المراد تحليله:\n"
+            f"{req.transcription}"
+        )
+
+        response = model.generate_content(prompt)
+
+        import json
+        shorts_data = json.loads(response.text)
+        shorts_list = shorts_data.get("shorts", [])
+        max_secs = get_max_transcription_seconds(req.transcription)
+        for s in shorts_list:
+            s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
+            s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+
+            s["script"] = rebuild_script_for_short(
+                transcription=req.transcription,
+                start_time=s["start_time"],
+                end_time=s["end_time"],
+                fallback_script=s.get("script", "")
+            )
+
+            script_text = s.get("script", "").strip()
+            if script_text:
+                first_clause = re.split(r'[.!\?\n]', script_text)[0].strip()
+                if first_clause:
+                    s["hook"] = first_clause
+
+        TASKS[task_id] = {
+            "status": "success",
+            "progress": "✅ تم اقتراح المقاطع بنجاح!",
+            "shorts": shorts_list
+        }
+
+    except Exception as e:
+        print(f"[{task_id}] suggest_shorts_async failed: {e}", flush=True)
+        TASKS[task_id] = {
+            "status": "failed",
+            "error": str(e)
+        }
+
+
+@app.post("/api/suggest-shorts-async")
+def suggest_shorts_async(req: SuggestShortsRequest, background_tasks: BackgroundTasks):
+    if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
+        raise HTTPException(status_code=400, detail="Gemini API key is missing or invalid.")
+    
+    if not req.transcription or req.transcription.strip() == "":
+        raise HTTPException(status_code=400, detail="Transcription content is empty.")
+
+    task_id = str(uuid.uuid4())
+    TASKS[task_id] = {"status": "processing", "progress": "جاري تحضير طلب اقتراح المقاطع..."}
+    background_tasks.add_task(run_suggest_shorts_background, task_id, req)
+    
+    return {"status": "processing", "taskId": task_id}
+
+
 import subprocess
 import threading
 
