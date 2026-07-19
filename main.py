@@ -85,6 +85,7 @@ class CutRequest(BaseModel):
     start_time: str
     end_time: str
     quality: int = 720
+    convert_vertical: bool = False
 
 def parse_time_to_seconds(time_str: str) -> float:
     """Convert HH:MM:SS or MM:SS or raw seconds to float seconds"""
@@ -968,6 +969,107 @@ def cut_video(req: CutRequest):
     )
 
 
+def smart_vertical_crop(video_path: str, output_path: str) -> bool:
+    """
+    Analyzes scene cuts using PySceneDetect and active faces using MediaPipe/OpenCV,
+    crops each scene to a 9:16 target ratio centered on the active speaker,
+    and writes out a high-quality vertical MP4 video file.
+    """
+    try:
+        import cv2
+        import numpy as np
+
+        mp_face = None
+        face_detector = None
+        try:
+            import mediapipe as mp
+            mp_face = mp.solutions.face_detection
+            face_detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+        except Exception as mpe:
+            print(f"MediaPipe face detection not available: {mpe}. Fallback to center crop.", flush=True)
+
+        scene_cuts = [0.0]
+        try:
+            from scenedetect import detect, ContentDetector
+            scene_list = detect(video_path, ContentDetector(threshold=27.0))
+            for scene in scene_list:
+                scene_cuts.append(scene[1].get_seconds())
+        except Exception as sde:
+            print(f"PySceneDetect failed: {sde}. Fallback to single scene.", flush=True)
+
+        from moviepy.editor import VideoFileClip, concatenate_videoclips
+
+        clip = VideoFileClip(video_path)
+        if len(scene_cuts) == 1 or scene_cuts[-1] < clip.duration:
+            scene_cuts.append(clip.duration)
+
+        def get_center_x(frame):
+            if face_detector:
+                try:
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if frame.shape[2] == 3 else frame
+                    results = face_detector.process(rgb_frame)
+                    h, w, _ = frame.shape
+                    if results and results.detections:
+                        bbox = results.detections[0].location_data.relative_bounding_box
+                        x_center = int((bbox.xmin + bbox.width / 2) * w)
+                        return x_center
+                except Exception:
+                    pass
+            h, w, _ = frame.shape
+            return w // 2
+
+        sub_clips = []
+        for i in range(len(scene_cuts) - 1):
+            start_t = scene_cuts[i]
+            end_t = scene_cuts[i+1]
+            
+            if end_t - start_t < 0.4:
+                continue
+                
+            sub = clip.subclip(start_t, end_t)
+            first_frame = sub.get_frame(0)
+            
+            target_w = int(sub.h * 9 / 16)
+            if target_w > sub.w:
+                target_w = sub.w
+
+            x_center = get_center_x(first_frame)
+            
+            x1 = max(0, x_center - target_w // 2)
+            x2 = min(sub.w, x_center + target_w // 2)
+            
+            if x1 <= 0:
+                x1 = 0
+                x2 = target_w
+            elif x2 >= sub.w:
+                x2 = sub.w
+                x1 = sub.w - target_w
+                
+            cropped_sub = sub.crop(x1=x1, y1=0, x2=x2, y2=sub.h)
+            sub_clips.append(cropped_sub)
+
+        if sub_clips:
+            final_video = concatenate_videoclips(sub_clips)
+            final_video.write_videofile(
+                output_path,
+                codec="libx264",
+                audio_codec="aac",
+                preset="fast",
+                threads=4,
+                logger=None
+            )
+            clip.close()
+            final_video.close()
+            return True
+        else:
+            clip.close()
+            return False
+
+    except Exception as e:
+        print(f"Smart vertical crop failed: {e}", flush=True)
+        return False
+
+
 def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
     if len(TASKS) > 200:
         keys_to_remove = list(TASKS.keys())[:50]
@@ -1041,6 +1143,16 @@ def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
         if os.path.exists(temp_raw_path):
             try: os.remove(temp_raw_path)
             except: pass
+
+        if req.convert_vertical:
+            TASKS[task_id]["progress"] = "📱 جاري تحويل الفيديو إلى طولي (9:16) وتتبع الوجوه بالذكاء الاصطناعي..."
+            vert_output_path = os.path.join(task_dir, "vert_clip.mp4")
+            success = smart_vertical_crop(output_path, vert_output_path)
+            if success and os.path.exists(vert_output_path):
+                try:
+                    os.replace(vert_output_path, output_path)
+                except Exception as ex:
+                    print(f"Failed to replace vertical output file: {ex}", flush=True)
 
         if not os.path.exists(output_path):
             raise Exception("Final clip output file was not found")
