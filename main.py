@@ -1005,57 +1005,54 @@ def smart_vertical_crop(video_path: str, output_path: str) -> bool:
     try:
         import cv2
         import numpy as np
+        import mediapipe as mp
+        from scenedetect import detect, ContentDetector
+        from moviepy.editor import VideoFileClip, concatenate_videoclips
 
-        mp_face = None
-        face_detector = None
-        try:
-            import mediapipe as mp
-            mp_face = mp.solutions.face_detection
-            face_detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.5)
-        except Exception as mpe:
-            print(f"MediaPipe face detection not available: {mpe}. Fallback to center crop.", flush=True)
+        print("جاري تحليل المشاهد بدقة عالية باستخدام PySceneDetect...", flush=True)
+        scene_list = detect(video_path, ContentDetector(threshold=27.0))
 
         scene_cuts = [0.0]
-        try:
-            from scenedetect import detect, ContentDetector
-            scene_list = detect(video_path, ContentDetector(threshold=27.0))
-            for scene in scene_list:
-                scene_cuts.append(scene[1].get_seconds())
-        except Exception as sde:
-            print(f"PySceneDetect failed: {sde}. Fallback to single scene.", flush=True)
+        for scene in scene_list:
+            scene_cuts.append(scene[1].get_seconds())
 
-        from moviepy.editor import VideoFileClip, concatenate_videoclips
+        print(f"تم اكتشاف {len(scene_cuts)-1} تغير في المشاهد بدقة.", flush=True)
+
+        mp_face = mp.solutions.face_detection
+        face_detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+
+        def get_center_x(frame):
+            try:
+                results = face_detector.process(frame)
+                h, w, _ = frame.shape
+                if results and results.detections:
+                    bbox = results.detections[0].location_data.relative_bounding_box
+                    x_center = int((bbox.xmin + bbox.width / 2) * w)
+                    return x_center
+            except Exception as fe:
+                print(f"Face detector frame error: {fe}", flush=True)
+            h, w, _ = frame.shape
+            return w // 2
+
+        print("جاري قص المشاهد وتثبيت الكاميرا على الشخصيات...", flush=True)
 
         clip = VideoFileClip(video_path)
         if len(scene_cuts) == 1 or scene_cuts[-1] < clip.duration:
             scene_cuts.append(clip.duration)
 
-        def get_center_x(frame):
-            if face_detector:
-                try:
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if frame.shape[2] == 3 else frame
-                    results = face_detector.process(rgb_frame)
-                    h, w, _ = frame.shape
-                    if results and results.detections:
-                        bbox = results.detections[0].location_data.relative_bounding_box
-                        x_center = int((bbox.xmin + bbox.width / 2) * w)
-                        return x_center
-                except Exception:
-                    pass
-            h, w, _ = frame.shape
-            return w // 2
-
         sub_clips = []
+
         for i in range(len(scene_cuts) - 1):
-            start_t = scene_cuts[i]
-            end_t = scene_cuts[i+1]
+            start_time = scene_cuts[i]
+            end_time = scene_cuts[i+1]
             
-            if end_t - start_t < 0.4:
+            # تجاهل المشاهد اللي أقل من نص ثانية
+            if end_time - start_time < 0.4:
                 continue
                 
-            sub = clip.subclip(start_t, end_t)
-            first_frame = sub.get_frame(0)
+            sub = clip.subclip(start_time, end_time)
             
+            first_frame = sub.get_frame(0)
             target_w = int(sub.h * 9 / 16)
             if target_w > sub.w:
                 target_w = sub.w
@@ -1075,6 +1072,7 @@ def smart_vertical_crop(video_path: str, output_path: str) -> bool:
             cropped_sub = sub.crop(x1=x1, y1=0, x2=x2, y2=sub.h)
             sub_clips.append(cropped_sub)
 
+        print("جاري تجميع الفيديو النهائي وإنتاجه...", flush=True)
         if sub_clips:
             final_video = concatenate_videoclips(sub_clips)
             final_video.write_videofile(
@@ -1093,7 +1091,7 @@ def smart_vertical_crop(video_path: str, output_path: str) -> bool:
             return ffmpeg_center_vertical_crop(video_path, output_path)
 
     except Exception as e:
-        print(f"Smart vertical crop failed: {e}. Executing FFmpeg center crop fallback...", flush=True)
+        print(f"Smart vertical crop error: {e}. Executing FFmpeg center crop fallback...", flush=True)
         return ffmpeg_center_vertical_crop(video_path, output_path)
 
 
