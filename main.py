@@ -959,6 +959,15 @@ def cut_video(req: CutRequest):
     if not os.path.exists(output_path):
         raise HTTPException(500, "Final output MP4 file was not generated")
 
+    if req.convert_vertical:
+        vert_output_path = os.path.join(TEMP_DIR, f"vert_{file_id}.mp4")
+        success = smart_vertical_crop(output_path, vert_output_path)
+        if success and os.path.exists(vert_output_path):
+            try:
+                os.replace(vert_output_path, output_path)
+            except Exception as ex:
+                print(f"Failed to replace vertical output file: {ex}", flush=True)
+
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     print(f"✅ Success! {size_mb:.2f}MB | {elapsed:.1f}s | {req.quality}p MP4 (Fade/Volume applied: {fade_applied})", flush=True)
 
@@ -969,11 +978,29 @@ def cut_video(req: CutRequest):
     )
 
 
+def ffmpeg_center_vertical_crop(video_path: str, output_path: str) -> bool:
+    """Fallback FFmpeg 9:16 center crop filter"""
+    try:
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', video_path,
+            '-vf', 'crop=ih*9/16:ih:(iw-ih*9/16)/2:0',
+            '-c:a', 'copy',
+            output_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        return res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0
+    except Exception as e:
+        print(f"FFmpeg center vertical crop failed: {e}", flush=True)
+        return False
+
+
 def smart_vertical_crop(video_path: str, output_path: str) -> bool:
     """
     Analyzes scene cuts using PySceneDetect and active faces using MediaPipe/OpenCV,
     crops each scene to a 9:16 target ratio centered on the active speaker,
     and writes out a high-quality vertical MP4 video file.
+    Falls back to FFmpeg 9:16 center crop if advanced AI detection fails.
     """
     try:
         import cv2
@@ -1063,11 +1090,11 @@ def smart_vertical_crop(video_path: str, output_path: str) -> bool:
             return True
         else:
             clip.close()
-            return False
+            return ffmpeg_center_vertical_crop(video_path, output_path)
 
     except Exception as e:
-        print(f"Smart vertical crop failed: {e}", flush=True)
-        return False
+        print(f"Smart vertical crop failed: {e}. Executing FFmpeg center crop fallback...", flush=True)
+        return ffmpeg_center_vertical_crop(video_path, output_path)
 
 
 def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
