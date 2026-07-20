@@ -85,7 +85,6 @@ class CutRequest(BaseModel):
     start_time: str
     end_time: str
     quality: int = 720
-    convert_vertical: bool = False
 
 def parse_time_to_seconds(time_str: str) -> float:
     """Convert HH:MM:SS or MM:SS or raw seconds to float seconds"""
@@ -959,15 +958,6 @@ def cut_video(req: CutRequest):
     if not os.path.exists(output_path):
         raise HTTPException(500, "Final output MP4 file was not generated")
 
-    if req.convert_vertical:
-        vert_output_path = os.path.join(TEMP_DIR, f"vert_{file_id}.mp4")
-        success = smart_vertical_crop(output_path, vert_output_path)
-        if success and os.path.exists(vert_output_path):
-            try:
-                os.replace(vert_output_path, output_path)
-            except Exception as ex:
-                print(f"Failed to replace vertical output file: {ex}", flush=True)
-
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     print(f"✅ Success! {size_mb:.2f}MB | {elapsed:.1f}s | {req.quality}p MP4 (Fade/Volume applied: {fade_applied})", flush=True)
 
@@ -976,141 +966,6 @@ def cut_video(req: CutRequest):
         media_type="video/mp4",
         filename=f"cut_{file_id}.mp4"
     )
-
-
-def ffmpeg_center_vertical_crop(video_path: str, output_path: str) -> bool:
-    """Fallback FFmpeg 9:16 center crop filter"""
-    try:
-        cmd = [
-            'ffmpeg', '-y',
-            '-i', video_path,
-            '-vf', 'crop=ih*9/16:ih:(iw-ih*9/16)/2:0',
-            '-c:a', 'copy',
-            output_path
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        return res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0
-    except Exception as e:
-        print(f"FFmpeg center vertical crop failed: {e}", flush=True)
-        return False
-
-
-def smart_vertical_crop(video_path: str, output_path: str) -> bool:
-    """
-    Multi-frame face tracking & scene detection for 9:16 vertical video conversion.
-    Samples multiple frames per scene to accurately detect speaker face position.
-    """
-    try:
-        import cv2
-        import numpy as np
-        import mediapipe as mp
-        from scenedetect import detect, ContentDetector
-        from moviepy.editor import VideoFileClip, concatenate_videoclips
-
-        print("🎬 Analyzing scene cuts using PySceneDetect...", flush=True)
-        scene_cuts = [0.0]
-        try:
-            scene_list = detect(video_path, ContentDetector(threshold=27.0))
-            for scene in scene_list:
-                scene_cuts.append(scene[1].get_seconds())
-        except Exception as sde:
-            print(f"PySceneDetect failed: {sde}. Fallback to single scene.", flush=True)
-
-        mp_face = mp.solutions.face_detection
-        detector_full = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.25)
-        detector_short = mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.25)
-
-        def get_frame_face_center(frame):
-            h, w, _ = frame.shape
-            res = detector_full.process(frame)
-            if not res or not res.detections:
-                res = detector_short.process(frame)
-            
-            if res and res.detections:
-                best_det = max(res.detections, key=lambda d: d.score[0] if d.score else 0)
-                bbox = best_det.location_data.relative_bounding_box
-                x_center = int((bbox.xmin + bbox.width / 2) * w)
-                score = best_det.score[0] if best_det.score else 0.5
-                return x_center, score
-            return None, 0
-
-        def get_scene_face_center(sub_clip):
-            dur = sub_clip.duration
-            if dur <= 0:
-                return sub_clip.w // 2
-                
-            sample_times = [dur * p for p in [0.15, 0.35, 0.5, 0.65, 0.85]]
-            detected_centers = []
-            
-            for t_sample in sample_times:
-                try:
-                    f = sub_clip.get_frame(t_sample)
-                    cx, score = get_frame_face_center(f)
-                    if cx is not None:
-                        detected_centers.append((score, cx))
-                except Exception:
-                    pass
-
-            if detected_centers:
-                detected_centers.sort(key=lambda item: item[0], reverse=True)
-                return detected_centers[0][1]
-            
-            return sub_clip.w // 2
-
-        print("👤 Tracking speaker face across multi-frame samples...", flush=True)
-        clip = VideoFileClip(video_path)
-        if len(scene_cuts) == 1 or scene_cuts[-1] < clip.duration:
-            scene_cuts.append(clip.duration)
-
-        sub_clips = []
-        for i in range(len(scene_cuts) - 1):
-            start_time = scene_cuts[i]
-            end_time = scene_cuts[i+1]
-            
-            if end_time - start_time < 0.4:
-                continue
-                
-            sub = clip.subclip(start_time, end_time)
-            target_w = int(sub.h * 9 / 16)
-            if target_w > sub.w:
-                target_w = sub.w
-
-            x_center = get_scene_face_center(sub)
-            
-            x1 = max(0, x_center - target_w // 2)
-            x2 = min(sub.w, x_center + target_w // 2)
-            
-            if x1 <= 0:
-                x1 = 0
-                x2 = target_w
-            elif x2 >= sub.w:
-                x2 = sub.w
-                x1 = sub.w - target_w
-                
-            cropped_sub = sub.crop(x1=x1, y1=0, x2=x2, y2=sub.h)
-            sub_clips.append(cropped_sub)
-
-        print("🎥 Concatenating final vertical 9:16 clip...", flush=True)
-        if sub_clips:
-            final_video = concatenate_videoclips(sub_clips)
-            final_video.write_videofile(
-                output_path,
-                codec="libx264",
-                audio_codec="aac",
-                preset="fast",
-                threads=4,
-                logger=None
-            )
-            clip.close()
-            final_video.close()
-            return True
-        else:
-            clip.close()
-            return ffmpeg_center_vertical_crop(video_path, output_path)
-
-    except Exception as e:
-        print(f"Smart vertical crop error: {e}. Executing FFmpeg center crop fallback...", flush=True)
-        return ffmpeg_center_vertical_crop(video_path, output_path)
 
 
 def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
@@ -1186,16 +1041,6 @@ def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
         if os.path.exists(temp_raw_path):
             try: os.remove(temp_raw_path)
             except: pass
-
-        if req.convert_vertical:
-            TASKS[task_id]["progress"] = "📱 جاري تحويل الفيديو إلى طولي (9:16) وتتبع الوجوه بالذكاء الاصطناعي..."
-            vert_output_path = os.path.join(task_dir, "vert_clip.mp4")
-            success = smart_vertical_crop(output_path, vert_output_path)
-            if success and os.path.exists(vert_output_path):
-                try:
-                    os.replace(vert_output_path, output_path)
-                except Exception as ex:
-                    print(f"Failed to replace vertical output file: {ex}", flush=True)
 
         if not os.path.exists(output_path):
             raise Exception("Final clip output file was not found")

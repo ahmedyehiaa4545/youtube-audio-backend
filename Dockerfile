@@ -6,14 +6,12 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies (including ffmpeg, curl, nodejs, openGL, glib)
+# Install system dependencies (including ffmpeg, curl, nodejs)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     ffmpeg \
     nodejs \
-    libgl1 \
-    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the Deno binary directly from the official Deno image

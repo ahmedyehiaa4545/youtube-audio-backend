@@ -6,8 +6,3 @@ yt-dlp
 google-generativeai
 pydub
 requests
-scenedetect[opencv]
-mediapipe
-opencv-python-headless
-moviepy
-
