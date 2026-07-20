@@ -997,10 +997,8 @@ def ffmpeg_center_vertical_crop(video_path: str, output_path: str) -> bool:
 
 def smart_vertical_crop(video_path: str, output_path: str) -> bool:
     """
-    Analyzes scene cuts using PySceneDetect and active faces using MediaPipe/OpenCV,
-    crops each scene to a 9:16 target ratio centered on the active speaker,
-    and writes out a high-quality vertical MP4 video file.
-    Falls back to FFmpeg 9:16 center crop if advanced AI detection fails.
+    Multi-frame face tracking & scene detection for 9:16 vertical video conversion.
+    Samples multiple frames per scene to accurately detect speaker face position.
     """
     try:
         import cv2
@@ -1009,55 +1007,75 @@ def smart_vertical_crop(video_path: str, output_path: str) -> bool:
         from scenedetect import detect, ContentDetector
         from moviepy.editor import VideoFileClip, concatenate_videoclips
 
-        print("جاري تحليل المشاهد بدقة عالية باستخدام PySceneDetect...", flush=True)
-        scene_list = detect(video_path, ContentDetector(threshold=27.0))
-
+        print("🎬 Analyzing scene cuts using PySceneDetect...", flush=True)
         scene_cuts = [0.0]
-        for scene in scene_list:
-            scene_cuts.append(scene[1].get_seconds())
-
-        print(f"تم اكتشاف {len(scene_cuts)-1} تغير في المشاهد بدقة.", flush=True)
+        try:
+            scene_list = detect(video_path, ContentDetector(threshold=27.0))
+            for scene in scene_list:
+                scene_cuts.append(scene[1].get_seconds())
+        except Exception as sde:
+            print(f"PySceneDetect failed: {sde}. Fallback to single scene.", flush=True)
 
         mp_face = mp.solutions.face_detection
-        face_detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+        detector_full = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.25)
+        detector_short = mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.25)
 
-        def get_center_x(frame):
-            try:
-                results = face_detector.process(frame)
-                h, w, _ = frame.shape
-                if results and results.detections:
-                    bbox = results.detections[0].location_data.relative_bounding_box
-                    x_center = int((bbox.xmin + bbox.width / 2) * w)
-                    return x_center
-            except Exception as fe:
-                print(f"Face detector frame error: {fe}", flush=True)
+        def get_frame_face_center(frame):
             h, w, _ = frame.shape
-            return w // 2
+            res = detector_full.process(frame)
+            if not res or not res.detections:
+                res = detector_short.process(frame)
+            
+            if res and res.detections:
+                best_det = max(res.detections, key=lambda d: d.score[0] if d.score else 0)
+                bbox = best_det.location_data.relative_bounding_box
+                x_center = int((bbox.xmin + bbox.width / 2) * w)
+                score = best_det.score[0] if best_det.score else 0.5
+                return x_center, score
+            return None, 0
 
-        print("جاري قص المشاهد وتثبيت الكاميرا على الشخصيات...", flush=True)
+        def get_scene_face_center(sub_clip):
+            dur = sub_clip.duration
+            if dur <= 0:
+                return sub_clip.w // 2
+                
+            sample_times = [dur * p for p in [0.15, 0.35, 0.5, 0.65, 0.85]]
+            detected_centers = []
+            
+            for t_sample in sample_times:
+                try:
+                    f = sub_clip.get_frame(t_sample)
+                    cx, score = get_frame_face_center(f)
+                    if cx is not None:
+                        detected_centers.append((score, cx))
+                except Exception:
+                    pass
 
+            if detected_centers:
+                detected_centers.sort(key=lambda item: item[0], reverse=True)
+                return detected_centers[0][1]
+            
+            return sub_clip.w // 2
+
+        print("👤 Tracking speaker face across multi-frame samples...", flush=True)
         clip = VideoFileClip(video_path)
         if len(scene_cuts) == 1 or scene_cuts[-1] < clip.duration:
             scene_cuts.append(clip.duration)
 
         sub_clips = []
-
         for i in range(len(scene_cuts) - 1):
             start_time = scene_cuts[i]
             end_time = scene_cuts[i+1]
             
-            # تجاهل المشاهد اللي أقل من نص ثانية
             if end_time - start_time < 0.4:
                 continue
                 
             sub = clip.subclip(start_time, end_time)
-            
-            first_frame = sub.get_frame(0)
             target_w = int(sub.h * 9 / 16)
             if target_w > sub.w:
                 target_w = sub.w
 
-            x_center = get_center_x(first_frame)
+            x_center = get_scene_face_center(sub)
             
             x1 = max(0, x_center - target_w // 2)
             x2 = min(sub.w, x_center + target_w // 2)
@@ -1072,7 +1090,7 @@ def smart_vertical_crop(video_path: str, output_path: str) -> bool:
             cropped_sub = sub.crop(x1=x1, y1=0, x2=x2, y2=sub.h)
             sub_clips.append(cropped_sub)
 
-        print("جاري تجميع الفيديو النهائي وإنتاجه...", flush=True)
+        print("🎥 Concatenating final vertical 9:16 clip...", flush=True)
         if sub_clips:
             final_video = concatenate_videoclips(sub_clips)
             final_video.write_videofile(
