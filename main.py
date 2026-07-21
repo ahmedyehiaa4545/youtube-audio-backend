@@ -373,6 +373,37 @@ def download_audio_via_rapidapi(youtube_url: str, output_path: str) -> str:
     print("[+] Audio downloaded and saved successfully.", flush=True)
     return output_path
 
+def download_audio_smart(youtube_url: str, output_path: str) -> str:
+    """
+    Downloads YouTube audio fast via direct yt-dlp extraction (takes 2-4 seconds).
+    If yt-dlp fails (e.g. YouTube anti-bot restriction), falls back smoothly to RapidAPI.
+    """
+    print(f"⚡ Attempting fast direct audio extraction via yt-dlp...", flush=True)
+    try:
+        ytdl_cmd = [
+            'yt-dlp',
+            '--quiet', '--no-warnings',
+            '--no-playlist',
+            '-x', '--audio-format', 'mp3',
+            '--audio-quality', '0',
+            '-o', output_path
+        ]
+        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+            ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
+        ytdl_cmd.append(youtube_url)
+
+        res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=90)
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            print("🚀 Fast audio download via yt-dlp succeeded!", flush=True)
+            return output_path
+        else:
+            err_msg = res.stderr.strip() if res.stderr else "yt-dlp returned non-zero code or empty file"
+            print(f"⚠️ Direct yt-dlp extraction failed ({err_msg}). Falling back to RapidAPI...", flush=True)
+    except Exception as e:
+        print(f"⚠️ Direct yt-dlp extraction error ({e}). Falling back to RapidAPI...", flush=True)
+
+    return download_audio_via_rapidapi(youtube_url, output_path)
+
 # دالة لضبط التوقيتات برمجياً (رياضياً)
 def adjust_timestamps(text: str, offset_minutes: int) -> str:
     if offset_minutes == 0:
@@ -409,16 +440,15 @@ def adjust_timestamps(text: str, offset_minutes: int) -> str:
     return text
 
 def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: int = 7, task_id: str = None) -> str:
+    import concurrent.futures
+
     genai.configure(api_key=api_key)
-    # Use the model requested by the user
     selected_model = "gemini-3.1-flash-lite"
-    full_transcription = ""
 
     print(f"🟢 النموذج المستخدم: {selected_model}", flush=True)
     if task_id and task_id in TASKS:
         TASKS[task_id]["progress"] = "تقسيم ملف الصوت لتفادي استهلاك الذاكرة..."
 
-    # Split audio into chunks using ffmpeg to avoid loading the entire file into memory (OOM crash)
     dir_name = os.path.dirname(audio_path)
     chunk_pattern = os.path.join(dir_name, "chunk_%d.mp3")
     segment_time_sec = chunk_minutes * 60
@@ -438,7 +468,6 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
     import glob
     chunk_files = glob.glob(os.path.join(dir_name, "chunk_*.mp3"))
     
-    # Sort chunks numerically based on their index (e.g. chunk_0.mp3, chunk_1.mp3)
     def get_chunk_idx(filepath):
         try:
             basename = os.path.basename(filepath)
@@ -448,36 +477,30 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
             return 9999
             
     chunk_files.sort(key=get_chunk_idx)
+    total_chunks = len(chunk_files)
 
-    print(f"[+] تم تقسيم الصوت إلى {len(chunk_files)} أجزاء.", flush=True)
+    print(f"[+] تم تقسيم الصوت إلى {total_chunks} أجزاء.", flush=True)
     if task_id and task_id in TASKS:
-        TASKS[task_id]["progress"] = f"تم تقسيم الصوت إلى {len(chunk_files)} أجزاء. جاري بدء تفريغها..."
+        TASKS[task_id]["progress"] = f"تم تقسيم الصوت إلى {total_chunks} أجزاء. جاري التفريغ الموازي..."
 
-    for idx, chunk_path in enumerate(chunk_files):
-        msg = f"معالجة الجزء {idx + 1}/{len(chunk_files)}: جاري الرفع إلى Gemini..."
-        print(f"\n[*] {msg}", flush=True)
-        if task_id and task_id in TASKS:
-            TASKS[task_id]["progress"] = msg
+    completed_count = 0
 
+    def process_single_chunk(args):
+        nonlocal completed_count
+        idx, chunk_path = args
         uploaded_file = None
-
         try:
-            print("   - جاري رفع الملف...", flush=True)
+            print(f"[*] [Chunk {idx+1}/{total_chunks}] Uploading to Gemini...", flush=True)
             uploaded_file = genai.upload_file(path=chunk_path)
 
             while uploaded_file.state.name == "PROCESSING":
-                time.sleep(3)
+                time.sleep(2)
                 uploaded_file = genai.get_file(uploaded_file.name)
 
             if uploaded_file.state.name == "FAILED":
-                print("❌ فشل رفع الملف.", flush=True)
-                continue
+                raise Exception(f"Gemini file upload state FAILED for chunk {idx+1}")
 
-            msg = f"معالجة الجزء {idx + 1}/{len(chunk_files)}: جاري التحليل والتفريغ..."
-            print(f"   - {msg}", flush=True)
-            if task_id and task_id in TASKS:
-                TASKS[task_id]["progress"] = msg
-
+            print(f"[*] [Chunk {idx+1}/{total_chunks}] Transcribing with Gemini...", flush=True)
             model = genai.GenerativeModel(selected_model)
 
             prompt = (
@@ -496,32 +519,35 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
 
             response = model.generate_content([prompt, uploaded_file])
 
-            print("✅ تم تفريغ الجزء.", flush=True)
-
-            # تعديل التوقيتات برمجياً
             adjusted_text = adjust_timestamps(response.text, idx * chunk_minutes)
-            # تحويل أي توقيتات فردية متبقية إلى نطاقات زمنية لضمان دقة القص والسكريبت 100%
             adjusted_text = convert_single_timestamps_to_ranges(adjusted_text)
-            full_transcription += "\n" + adjusted_text
 
-        except Exception as e:
-            print(f"❌ خطأ في تفريغ الجزء {idx + 1}: {e}", flush=True)
-            raise e
+            completed_count += 1
+            msg = f"تم تفريغ الجزء {completed_count}/{total_chunks} بالذكاء الاصطناعي..."
+            print(f"✅ [Chunk {idx+1}/{total_chunks}] {msg}", flush=True)
+            if task_id and task_id in TASKS:
+                TASKS[task_id]["progress"] = msg
+
+            return idx, adjusted_text
 
         finally:
             if uploaded_file:
-                try:
-                    genai.delete_file(uploaded_file.name)
-                except:
-                    pass
-
+                try: genai.delete_file(uploaded_file.name)
+                except: pass
             if os.path.exists(chunk_path):
-                try:
-                    os.remove(chunk_path)
-                except:
-                    pass
+                try: os.remove(chunk_path)
+                except: pass
 
-    return full_transcription.strip()
+    max_workers = min(5, total_chunks) if total_chunks > 0 else 1
+    chunks_results = ["" for _ in range(total_chunks)]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(process_single_chunk, (idx, cp)) for idx, cp in enumerate(chunk_files)]
+        for future in concurrent.futures.as_completed(futures):
+            idx, text = future.result()
+            chunks_results[idx] = text
+
+    return "\n".join(chunks_results).strip()
 
 def clean_temp_dir(path: str):
     """Clean up the temporary directory after some delay or on request"""
@@ -559,8 +585,30 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
     try:
         audio_path = os.path.join(task_dir, "audio.mp3")
         
-        print(f"[{task_id}] Background: Downloading YouTube audio via RapidAPI...", flush=True)
-        download_audio_via_rapidapi(youtube_url, audio_path)
+        print(f"[{task_id}] Background: Downloading YouTube audio smartly...", flush=True)
+        download_audio_smart(youtube_url, audio_path)
+        
+        if not os.path.exists(audio_path):
+            raise Exception("فشل تحميل ملف الصوت من السيرفر.")
+            
+        print(f"[{task_id}] Background: Transcribing audio with Gemini...", flush=True)
+        transcription_text = transcribe_audio_with_gemini(
+            audio_path=audio_path,
+            api_key=gemini_api_key,
+            task_id=task_id
+        )
+        
+        # Success
+        TASKS[task_id].update({
+            "status": "success",
+            "progress": "اكتمل بنجاح!",
+            "audioUrl": f"public/temp_{task_id}/audio.mp3",
+            "transcription": transcription_text
+        })
+        
+    except Exception as e:
+        clean_temp_dir(task_dir)
+        print(f"[{task_id}] Background process failed: {e}", flush=True)
         
         if not os.path.exists(audio_path):
             raise Exception("فشل تحميل ملف الصوت من السيرفر.")
