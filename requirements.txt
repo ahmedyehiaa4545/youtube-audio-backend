@@ -6,3 +6,8 @@ yt-dlp
 google-generativeai
 pydub
 requests
+opencv-python-headless
+scenedetect
+protobuf==5.29.5
+mediapipe==0.10.14
+

@@ -6,12 +6,13 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies (including ffmpeg, curl, nodejs)
+# Install system dependencies (including ffmpeg, curl, nodejs, libgomp1)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     ffmpeg \
     nodejs \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the Deno binary directly from the official Deno image

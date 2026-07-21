@@ -1081,3 +1081,223 @@ def cut_video_async(req: CutRequest, background_tasks: BackgroundTasks):
     
     return {"status": "processing", "taskId": task_id}
 
+
+# ==================== Horizontal to Vertical (9:16) Conversion (KIM Algorithm) ====================
+
+def convert_video_to_vertical(video_path: str, output_path: str, progress_callback=None):
+    import cv2
+    import numpy as np
+    import mediapipe as mp
+    import subprocess
+    from scenedetect import detect, ContentDetector
+
+    if progress_callback:
+        progress_callback("🎬 جاري فتح وتحليل بيانات الفيديو الأصلي...")
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise Exception("فشل فتح ملف الفيديو.")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if W <= 0 or H <= 0 or total_frames <= 0:
+        cap.release()
+        raise Exception("بيانات أبعاد الفيديو أو عدد الفريمات غير صالحة.")
+
+    target_w = int(H * 9 / 16)
+    if target_w % 2 != 0:
+        target_w += 1
+    if target_w > W:
+        target_w = W if W % 2 == 0 else W - 1
+
+    out_h = H if H % 2 == 0 else H - 1
+
+    if progress_callback:
+        progress_callback("🔍 جاري تحليل وتحديد المشاهد (Scene Detection)...")
+
+    scene_list = detect(video_path, ContentDetector(threshold=27.0))
+    raw_cuts = [0] + [s[1].get_frames() for s in scene_list]
+    if not raw_cuts or raw_cuts[-1] < total_frames:
+        raw_cuts.append(total_frames)
+
+    min_len = max(int(fps * 0.5), 1)
+    segments = []
+    start = raw_cuts[0]
+    for cut in raw_cuts[1:]:
+        if cut - start >= min_len:
+            segments.append((start, cut))
+            start = cut
+    if start < total_frames:
+        if segments:
+            segments[-1] = (segments[-1][0], total_frames)
+        else:
+            segments = [(0, total_frames)]
+
+    if progress_callback:
+        progress_callback(f"👥 جاري تحليل الوجوه وتحديد الكادر لـ {len(segments)} مشهد...")
+
+    mp_face = mp.solutions.face_detection
+    detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+
+    def sample_scene_faces(start_f, end_f):
+        boxes = []
+        dur = (end_f - start_f) / fps
+        n = int(max(5, min(15, dur)))
+        idxs = [start_f + int((end_f - start_f) * t) for t in np.linspace(0.05, 0.95, n)]
+        for idx in idxs:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            res = detector.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            if res.detections:
+                for d in res.detections:
+                    bb = d.location_data.relative_bounding_box
+                    x1 = max(0, int(bb.xmin * W))
+                    x2 = min(W, int((bb.xmin + bb.width) * W))
+                    if (x2 - x1) > W * 0.04:
+                        boxes.append((x1, x2))
+        return boxes
+
+    def compute_x1(boxes):
+        if not boxes:
+            return (W - target_w) // 2
+        leftmost = min(a for a, _ in boxes)
+        rightmost = max(b for _, b in boxes)
+        centers = np.array([(a + b) / 2 for a, b in boxes])
+        anchor = float(np.median(centers))
+
+        if (rightmost - leftmost) <= target_w * 0.98:
+            x1 = (leftmost + rightmost) / 2 - target_w / 2
+        else:
+            x1 = anchor - target_w / 2
+        return int(max(0, min(x1, W - target_w)))
+
+    scene_x1 = [compute_x1(sample_scene_faces(a, b)) for a, b in segments]
+    detector.close()
+
+    if progress_callback:
+        progress_callback("⚡ جاري اقتصاص وقص الفيديو طولي (9:16) ومعالجة الإطارات...")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{target_w}x{out_h}", "-r", str(fps),
+        "-i", "-",
+        "-i", video_path,
+        "-map", "0:v", "-map", "1:a?",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-profile:v", "high",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        "-shortest", output_path
+    ]
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    seg_i, frame_i = 0, 0
+    while True:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            break
+        while seg_i + 1 < len(segments) and frame_i >= segments[seg_i][1]:
+            seg_i += 1
+        x1 = scene_x1[seg_i]
+        crop = frame[0:out_h, x1:x1 + target_w]
+        proc.stdin.write(crop.tobytes())
+        frame_i += 1
+        if frame_i % 150 == 0 and progress_callback:
+            percent = int((frame_i / total_frames) * 100)
+            progress_callback(f"🎬 جاري معالجة الإطارات: {frame_i}/{total_frames} ({percent}%)...")
+
+    proc.stdin.close()
+    proc.wait()
+    cap.release()
+
+
+def run_convert_vertical_background(task_id: str, video_path: str, youtube_url: str, task_dir: str):
+    if len(TASKS) > 200:
+        keys_to_remove = list(TASKS.keys())[:50]
+        for k in keys_to_remove:
+            TASKS.pop(k, None)
+
+    try:
+        TASKS[task_id] = {"status": "processing", "progress": "🎬 جاري بدء معالجة الفيديو..."}
+
+        # Download from YouTube if URL provided
+        if youtube_url and not video_path:
+            video_path = os.path.join(task_dir, "input_yt.mp4")
+            TASKS[task_id]["progress"] = "📥 جاري تنزيل فيديو يوتيوب الأصلي..."
+            ytdl_cmd = [
+                'yt-dlp',
+                '--quiet', '--no-warnings',
+                '--no-playlist',
+                '-f', 'best[height<=720]/best',
+                '--merge-output-format', 'mp4',
+                '-o', video_path
+            ]
+            if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+                ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
+            ytdl_cmd.append(youtube_url)
+            res = subprocess.run(ytdl_cmd, capture_output=True, text=True)
+            if res.returncode != 0 or not os.path.exists(video_path):
+                raise Exception(f"فشل تنزيل فيديو يوتيوب: {res.stderr.strip() if res.stderr else 'Unknown error'}")
+
+        output_path = os.path.join(task_dir, "vertical_tiktok.mp4")
+
+        def update_progress(msg: str):
+            if task_id in TASKS:
+                TASKS[task_id]["progress"] = msg
+
+        convert_video_to_vertical(video_path, output_path, update_progress)
+
+        if not os.path.exists(output_path):
+            raise Exception("لم يتم توليد ملف الفيديو الطولي الناتج.")
+
+        video_url = f"public/temp_{task_id}/vertical_tiktok.mp4"
+        TASKS[task_id] = {
+            "status": "success",
+            "progress": "✅ تم تحويل الفيديو إلى طولي بنجاح!",
+            "videoUrl": video_url
+        }
+        print(f"[{task_id}] Vertical conversion completed: {video_url}", flush=True)
+
+    except Exception as e:
+        print(f"[{task_id}] Vertical conversion failed: {e}", flush=True)
+        TASKS[task_id] = {
+            "status": "failed",
+            "error": str(e)
+        }
+
+
+from fastapi import File, UploadFile, Form
+
+@app.post("/api/convert-vertical-async")
+async def convert_vertical_async(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(None),
+    youtubeUrl: str = Form(None)
+):
+    if not file and not youtubeUrl:
+        raise HTTPException(400, "يجب تحديد ملف فيديو للرفع أو إدخال رابط يوتيوب.")
+
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(PUBLIC_DIR, f"temp_{task_id}")
+    os.makedirs(task_dir, exist_ok=True)
+
+    video_path = None
+    if file:
+        video_path = os.path.join(task_dir, f"input_{file.filename}")
+        with open(video_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+    TASKS[task_id] = {"status": "processing", "progress": "جاري التحضير لتحويل الفيديو إلى طولي..."}
+    background_tasks.add_task(run_convert_vertical_background, task_id, video_path, youtubeUrl, task_dir)
+
+    return {"status": "processing", "taskId": task_id}
+
+
