@@ -8,6 +8,7 @@ pydub
 requests
 opencv-python-headless
 scenedetect
-protobuf==5.29.5
+protobuf>=4.25.3,<5.0.0
 mediapipe==0.10.14
+
 
