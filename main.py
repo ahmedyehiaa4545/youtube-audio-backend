@@ -80,6 +80,8 @@ class SuggestShortsRequest(BaseModel):
     geminiApiKey: str | None = None
     openrouterApiKey: str | None = None
     openrouterModel: str | None = "google/gemini-3.1-flash-lite"
+    customPrompt: str | None = None
+    titleStyle: str | None = "auto"
     numShorts: int = 3
 
 class CutRequest(BaseModel):
@@ -680,7 +682,7 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     return TASKS[task_id]
 
-def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, model_name: str = "google/gemini-3.1-flash-lite"):
+def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, model_name: str = "google/gemini-3.1-flash-lite", custom_prompt: str = None, title_style: str = "auto"):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -694,7 +696,7 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         "{\n"
         '  "shorts": [\n'
         '    {\n'
-        '      "title": "عنوان جذاب جداً ومثير للاهتمام",\n'
+        '      "title": "عنوان المقطع",\n'
         '      "start_time": "05:47",\n'
         '      "end_time": "06:20",\n'
         '      "script": "النص الكامل للمقطع القصير كما ورد في التفريغ",\n'
@@ -703,16 +705,28 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         '  ]\n'
         "}\n"
     )
+    
+    title_instruction = "5. صياغة عنوان جذاب ومثير للاهتمام لكل مقطع."
+    if title_style == "short":
+        title_instruction = "5. صياغة عنوان قصير ومختصر جداً من 2 إلى 4 كلمات فقط (قوي ومباشر وجذاب)."
+    elif title_style == "medium":
+        title_instruction = "5. صياغة عنوان متوسط ومفصل من 5 إلى 9 كلمات يوضح فكرة المقطع بوضوح وجاذبية."
+
     user_prompt = (
         f"قم بتحليل النص المفرغ التالي واستخرج أفضل {num_shorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
         "شروط استخراج كل مقطع:\n"
         "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق (مثال: 05:47 أو 12:30).\n"
-        "2. يجب أن تتراوح مدة كل مقطع بين 30 ثانية إلى 120 ثانية (دقيقتين كحد أقصى).\n"
+        "2. مدة المقطع المرنة: يمكن أن تكون قصيرة (من 15 إلى 30 ثانية) أو ممتدة حتى 150 ثانية (دقيقتين ونصف كحد أقصى) لتناسب كافة أنماط القصص والمحتوى دون إجبار على حد معين.\n"
         "3. يجب تحديد 'الخطاف' (Hook) وهو أول جملة نطقها المتحدث في أول 3 ثوانٍ بنفس المقطع تماماً.\n"
         "4. كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
-        "5. صياغة عنوان جذاب جداً (Catchy Title) لكل مقطع.\n\n"
-        f"النص المفرغ المراد تحليله:\n{transcription}"
+        f"{title_instruction}\n"
     )
+
+    if custom_prompt and custom_prompt.strip():
+        user_prompt += f"\n⚠️ توجيهات إضافية مخصصة من المستخدم (يجب الالتزام بها بصرامة عند تحديد المقاطع):\n{custom_prompt.strip()}\n"
+
+    user_prompt += f"\nالنص المفرغ المراد تحليله:\n{transcription}"
+
     payload = {
         "model": model_name,
         "messages": [
@@ -743,7 +757,14 @@ async def suggest_shorts(req: SuggestShortsRequest):
     if openrouter_key and openrouter_key.strip():
         print(f"🌐 Using OpenRouter ({openrouter_model}) for suggest_shorts...", flush=True)
         try:
-            shorts_data = call_openrouter_shorts(req.transcription, req.numShorts, openrouter_key, model_name=openrouter_model)
+            shorts_data = call_openrouter_shorts(
+                transcription=req.transcription,
+                num_shorts=req.numShorts,
+                api_key=openrouter_key,
+                model_name=openrouter_model,
+                custom_prompt=req.customPrompt,
+                title_style=req.titleStyle
+            )
             shorts_list = shorts_data.get("shorts", [])
         except Exception as or_err:
             print(f"⚠️ OpenRouter failed: {or_err}. Falling back to direct Gemini API...", flush=True)
@@ -762,9 +783,11 @@ async def suggest_shorts(req: SuggestShortsRequest):
             )
             prompt = (
                 "أنت خبير محترف في صناعة المحتوى الفيروسي ومقاطع الفيديو القصيرة.\n"
-                f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة بين 30 ثانية لدقيقتين:\n\n"
-                f"{req.transcription}"
+                f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة بين 15 ثانية ودقيقتين ونصف:\n\n"
             )
+            if req.customPrompt and req.customPrompt.strip():
+                prompt += f"توجيهات إضافية: {req.customPrompt.strip()}\n\n"
+            prompt += req.transcription
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(None, lambda: model.generate_content(prompt))
             import json
@@ -811,7 +834,14 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
         if openrouter_key and openrouter_key.strip():
             print(f"[{task_id}] 🌐 Using OpenRouter ({openrouter_model})...", flush=True)
             try:
-                shorts_data = call_openrouter_shorts(req.transcription, req.numShorts, openrouter_key, model_name=openrouter_model)
+                shorts_data = call_openrouter_shorts(
+                    transcription=req.transcription,
+                    num_shorts=req.numShorts,
+                    api_key=openrouter_key,
+                    model_name=openrouter_model,
+                    custom_prompt=req.customPrompt,
+                    title_style=req.titleStyle
+                )
                 shorts_list = shorts_data.get("shorts", [])
             except Exception as or_err:
                 print(f"[{task_id}] ⚠️ OpenRouter failed: {or_err}. Falling back to direct Gemini API...", flush=True)
@@ -829,17 +859,12 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
 
             prompt = (
                 "أنت خبير محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
-                f"قم بتحليل النص المفرغ التالي (الذي يحتوي على توقيتات دقيقة)، واستخرج منه أفضل {req.numShorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
-                "شروط استخراج كل مقطع:\n"
-                "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق. لا تخترع توقيتات جديدة.\n"
-                "2. اكتب أوقات البداية والنهاية كما هي مكتوبة في النص المفرغ تماماً دون أي تعديل أو تحويل (مثال: 05:47 أو 12:30).\n"
-                "3. يجب أن تتراوح مدة كل مقطع بين 30 ثانية إلى 120 ثانية (دقيقتين كحد أقصى) إذا احتاج المقطع ذلك لاكتمال المعنى والمعالجة.\n"
-                "4. يجب تحديد 'الخطاف' (Hook) وهو أول جملة نطقها المتحدث في أول 3 ثوانٍ بنفس المقطع تماماً وبنفس الكلمات المكتوبة في السكريبت دون أي تلخيص أو تغيير.\n"
-                "5. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
-                "6. صياغة عنوان جذاب جداً ومثير للاهتمام (Catchy Title) لكل مقطع.\n\n"
-                "النص المفرغ المراد تحليله:\n"
-                f"{req.transcription}"
+                f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة تتراوح مدتها بين 15 ثانية ودقيقتين ونصف (150 ثانية كحد أقصى) لتناسب القصة أو المعنى.\n\n"
             )
+            if req.customPrompt and req.customPrompt.strip():
+                prompt += f"⚠️ توجيهات إضافية مخصصة من المستخدم (يجب الالتزام بها بصرامة):\n{req.customPrompt.strip()}\n\n"
+
+            prompt += f"النص المفرغ المراد تحليله:\n{req.transcription}"
 
             response = model.generate_content(prompt)
 
