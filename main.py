@@ -61,6 +61,29 @@ def init_cookies():
 
 init_cookies()
 
+def cleanup_old_temp_files(max_age_seconds: int = 172800):
+    """Clean up temp folders and rendered videos older than 48 hours."""
+    try:
+        now = time.time()
+        for root_dir in [TEMP_DIR, PUBLIC_DIR]:
+            if not os.path.exists(root_dir):
+                continue
+            for item in os.listdir(root_dir):
+                item_path = os.path.join(root_dir, item)
+                try:
+                    if os.stat(item_path).st_mtime < (now - max_age_seconds):
+                        if os.path.isdir(item_path):
+                            shutil.rmtree(item_path, ignore_errors=True)
+                        else:
+                            os.remove(item_path)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"⚠️ Periodic 48h cleanup warning: {e}", flush=True)
+
+init_cookies()
+cleanup_old_temp_files()
+
 class DownloadRequest(BaseModel):
     youtubeUrl: str
     geminiApiKey: str | None = None
