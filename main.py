@@ -79,6 +79,7 @@ class SuggestShortsRequest(BaseModel):
     transcription: str
     geminiApiKey: str | None = None
     openrouterApiKey: str | None = None
+    openrouterModel: str | None = "google/gemini-3.1-flash-lite"
     numShorts: int = 3
 
 class CutRequest(BaseModel):
@@ -736,12 +737,13 @@ async def suggest_shorts(req: SuggestShortsRequest):
         raise HTTPException(status_code=400, detail="Transcription content is empty.")
     
     openrouter_key = req.openrouterApiKey or os.environ.get("OPENROUTER_API_KEY")
+    openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-3.1-flash-lite"
     shorts_list = []
 
     if openrouter_key and openrouter_key.strip():
-        print("🌐 Using OpenRouter (google/gemini-3.1-flash-lite) for suggest_shorts...", flush=True)
+        print(f"🌐 Using OpenRouter ({openrouter_model}) for suggest_shorts...", flush=True)
         try:
-            shorts_data = call_openrouter_shorts(req.transcription, req.numShorts, openrouter_key)
+            shorts_data = call_openrouter_shorts(req.transcription, req.numShorts, openrouter_key, model_name=openrouter_model)
             shorts_list = shorts_data.get("shorts", [])
         except Exception as or_err:
             print(f"⚠️ OpenRouter failed: {or_err}. Falling back to direct Gemini API...", flush=True)
@@ -803,12 +805,13 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
         TASKS[task_id] = {"status": "processing", "progress": f"✨ جاري تحليل النص بالذكاء الاصطناعي واقتراح {req.numShorts} مقاطع Shorts..."}
 
         openrouter_key = req.openrouterApiKey or os.environ.get("OPENROUTER_API_KEY")
+        openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-3.1-flash-lite"
         shorts_list = []
 
         if openrouter_key and openrouter_key.strip():
-            print(f"[{task_id}] 🌐 Using OpenRouter (google/gemini-3.1-flash-lite)...", flush=True)
+            print(f"[{task_id}] 🌐 Using OpenRouter ({openrouter_model})...", flush=True)
             try:
-                shorts_data = call_openrouter_shorts(req.transcription, req.numShorts, openrouter_key)
+                shorts_data = call_openrouter_shorts(req.transcription, req.numShorts, openrouter_key, model_name=openrouter_model)
                 shorts_list = shorts_data.get("shorts", [])
             except Exception as or_err:
                 print(f"[{task_id}] ⚠️ OpenRouter failed: {or_err}. Falling back to direct Gemini API...", flush=True)
