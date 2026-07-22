@@ -683,6 +683,41 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     return TASKS[task_id]
 
+def enforce_title_style(title: str, style: str) -> str:
+    if not title or not isinstance(title, str):
+        return title
+    
+    clean_title = title.strip()
+    
+    if style == "short":
+        # 1. If title contains colons, dashes, or question marks, cut at first segment
+        for sep in [':', ' - ', ' – ', ' | ', '؟', '?']:
+            if sep in clean_title:
+                parts = clean_title.split(sep)
+                if parts[0].strip():
+                    clean_title = parts[0].strip()
+                    break
+        
+        # 2. Strict word count limit (max 5 words)
+        words = clean_title.split()
+        if len(words) > 5:
+            clean_title = " ".join(words[:4]) + "!"
+        elif not clean_title.endswith(('!', '؟', '?')):
+            clean_title += "!"
+            
+    elif style == "medium":
+        words = clean_title.split()
+        if len(words) > 10:
+            for sep in [':', ' - ', ' – ', ' | ']:
+                if sep in clean_title:
+                    clean_title = clean_title.split(sep)[0].strip()
+                    break
+            words = clean_title.split()
+            if len(words) > 9:
+                clean_title = " ".join(words[:8]) + "..."
+                
+    return clean_title
+
 def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, model_name: str = "google/gemini-3.1-flash-lite", custom_prompt: str = None, title_style: str = "auto"):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
@@ -709,7 +744,7 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
     
     title_instruction = "5. صياغة عنوان جذاب ومثير للاهتمام لكل مقطع."
     if title_style == "short":
-        title_instruction = "5. صياغة عنوان قصير ومختصر جداً من 2 إلى 4 كلمات فقط (قوي ومباشر وجذاب)."
+        title_instruction = "5. صياغة عنوان قصير ومختصر جداً يتكون من 2 إلى 4 كلمات فقط (حد أقصى 5 كلمات كحد أقصى مطلق!). يمنع منعاً باتاً كتابة عناوين طويلة أو تفصيلية."
     elif title_style == "medium":
         title_instruction = "5. صياغة عنوان متوسط ومفصل من 5 إلى 9 كلمات يوضح فكرة المقطع بوضوح وجاذبية."
 
@@ -717,7 +752,7 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         f"قم بتحليل النص المفرغ التالي واستخرج أفضل {num_shorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
         "شروط استخراج كل مقطع:\n"
         "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق (مثال: 05:47 أو 12:30).\n"
-        "2. مدة المقطع المرنة: يمكن أن تكون قصيرة (من 15 إلى 30 ثانية) أو ممتدة حتى 150 ثانية (دقيقتين ونصف كحد أقصى) لتناسب كافة أنماط القصص والمحتوى دون إجبار على حد معين.\n"
+        "2. مدة المقطع المرنة: يجب أن تتراوح مدة كل مقطع بين 30 ثانية كحد أدنى وحتى 150 ثانية (دقيقتين ونصف كحد أقصى) لتناسب كافة أنماط القصص والمحتوى المحبك.\n"
         "3. يجب تحديد 'الخطاف' (Hook) وهو أول جملة نطقها المتحدث في أول 3 ثوانٍ بنفس المقطع تماماً.\n"
         "4. كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
         f"{title_instruction}\n"
@@ -784,7 +819,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
             )
             prompt = (
                 "أنت خبير محترف في صناعة المحتوى الفيروسي ومقاطع الفيديو القصيرة.\n"
-                f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة بين 15 ثانية ودقيقتين ونصف:\n\n"
+                f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة تتراوح مدتها بين 30 ثانية ودقيقتين ونصف (150 ثانية كحد أقصى):\n\n"
             )
             if req.customPrompt and req.customPrompt.strip():
                 prompt += f"توجيهات إضافية: {req.customPrompt.strip()}\n\n"
@@ -801,6 +836,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
     for s in shorts_list:
         s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
         s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+        s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
         s["script"] = rebuild_script_for_short(
             transcription=req.transcription,
             start_time=s["start_time"],
@@ -860,7 +896,7 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
 
             prompt = (
                 "أنت خبير محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
-                f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة تتراوح مدتها بين 15 ثانية ودقيقتين ونصف (150 ثانية كحد أقصى) لتناسب القصة أو المعنى.\n\n"
+                f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة تتراوح مدتها بين 30 ثانية كحد أدنى ودقيقتين ونصف (150 ثانية كحد أقصى) لتناسب القصة أو المعنى.\n\n"
             )
             if req.customPrompt and req.customPrompt.strip():
                 prompt += f"⚠️ توجيهات إضافية مخصصة من المستخدم (يجب الالتزام بها بصرامة):\n{req.customPrompt.strip()}\n\n"
@@ -877,6 +913,7 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
         for s in shorts_list:
             s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
             s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+            s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
 
             s["script"] = rebuild_script_for_short(
                 transcription=req.transcription,
