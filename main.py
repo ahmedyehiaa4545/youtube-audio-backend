@@ -380,7 +380,7 @@ def download_audio_via_rapidapi(youtube_url: str, output_path: str) -> str:
 def download_audio_smart(youtube_url: str, output_path: str) -> str:
     """
     Downloads YouTube audio fast via direct yt-dlp extraction (takes 2-4 seconds).
-    If yt-dlp fails (e.g. YouTube anti-bot restriction), falls back smoothly to RapidAPI.
+    If yt-dlp fails or stalls (e.g. YouTube anti-bot restriction), falls back smoothly to RapidAPI in 18 seconds max.
     """
     print(f"⚡ Attempting fast direct audio extraction via yt-dlp...", flush=True)
     try:
@@ -388,6 +388,7 @@ def download_audio_smart(youtube_url: str, output_path: str) -> str:
             'yt-dlp',
             '--quiet', '--no-warnings',
             '--no-playlist',
+            '--socket-timeout', '10',
             '-x', '--audio-format', 'mp3',
             '--audio-quality', '0',
             '-o', output_path
@@ -396,7 +397,7 @@ def download_audio_smart(youtube_url: str, output_path: str) -> str:
             ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
         ytdl_cmd.append(youtube_url)
 
-        res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=90)
+        res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=18)
         if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             print("🚀 Fast audio download via yt-dlp succeeded!", flush=True)
             return output_path
