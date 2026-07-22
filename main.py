@@ -77,7 +77,8 @@ class ShortsResponse(BaseModel):
 
 class SuggestShortsRequest(BaseModel):
     transcription: str
-    geminiApiKey: str
+    geminiApiKey: str | None = None
+    openrouterApiKey: str | None = None
     numShorts: int = 3
 
 class CutRequest(BaseModel):
@@ -678,80 +679,118 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
     return TASKS[task_id]
 
+def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, model_name: str = "google/gemini-3.1-flash-lite"):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://rekaption.com",
+        "X-Title": "ReKaption"
+    }
+    system_prompt = (
+        "أنت خبير محترف في صناعة المحتوى الفيروسي ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
+        "يجب أن تكون إجابتك بصيغة JSON فقط بالتنسيق التالي بدون أي نصوص إضافية خارج الـ JSON:\n"
+        "{\n"
+        '  "shorts": [\n'
+        '    {\n'
+        '      "title": "عنوان جذاب جداً ومثير للاهتمام",\n'
+        '      "start_time": "05:47",\n'
+        '      "end_time": "06:20",\n'
+        '      "script": "النص الكامل للمقطع القصير كما ورد في التفريغ",\n'
+        '      "hook": "الجملة الافتتاحية في أول 3 ثواني"\n'
+        '    }\n'
+        '  ]\n'
+        "}\n"
+    )
+    user_prompt = (
+        f"قم بتحليل النص المفرغ التالي واستخرج أفضل {num_shorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
+        "شروط استخراج كل مقطع:\n"
+        "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق (مثال: 05:47 أو 12:30).\n"
+        "2. يجب أن تتراوح مدة كل مقطع بين 30 ثانية إلى 120 ثانية (دقيقتين كحد أقصى).\n"
+        "3. يجب تحديد 'الخطاف' (Hook) وهو أول جملة نطقها المتحدث في أول 3 ثوانٍ بنفس المقطع تماماً.\n"
+        "4. كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
+        "5. صياغة عنوان جذاب جداً (Catchy Title) لكل مقطع.\n\n"
+        f"النص المفرغ المراد تحليله:\n{transcription}"
+    )
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "response_format": {"type": "json_object"}
+    }
+    
+    res = requests.post(url, headers=headers, json=payload, timeout=90)
+    if res.status_code != 200:
+        raise Exception(f"OpenRouter API error (status {res.status_code}): {res.text}")
+    
+    data = res.json()
+    content = data['choices'][0]['message']['content']
+    import json
+    return json.loads(content)
+
 @app.post("/api/suggest-shorts")
 async def suggest_shorts(req: SuggestShortsRequest):
-    if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
-        raise HTTPException(status_code=400, detail="Gemini API key is missing or invalid.")
-    
     if not req.transcription or req.transcription.strip() == "":
         raise HTTPException(status_code=400, detail="Transcription content is empty.")
     
-    try:
-        genai.configure(api_key=req.geminiApiKey)
-        
-        # Use structured JSON outputs with Gemini to guarantee perfect schema match
-        model = genai.GenerativeModel(
-            model_name="gemini-3-flash-preview",
-            generation_config={
-                "response_mime_type": "application/json",
-                "response_schema": ShortsResponse
-            }
-        )
-        
-        prompt = (
-            "أنت خبير محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
-            f"قم بتحليل النص المفرغ التالي (الذي يحتوي على توقيتات دقيقة)، واستخرج منه أفضل {req.numShorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
-            "شروط استخراج كل مقطع:\n"
-            "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق. لا تخترع توقيتات جديدة.\n"
-            "2. اكتب أوقات البداية والنهاية كما هي مكتوبة في النص المفرغ تماماً دون أي تعديل أو تحويل (مثال: 05:47 أو 12:30).\n"
-            "3. يجب أن تتراوح مدة كل مقطع بين 30 ثانية إلى 120 ثانية (دقيقتين كحد أقصى) إذا احتاج المقطع ذلك لاكتمال المعنى والمعالجة.\n"
-            "4. يجب تحديد 'الخطاف' (Hook) وهو أول جملة نطقها المتحدث في أول 3 ثوانٍ بنفس المقطع تماماً وبنفس الكلمات المكتوبة في السكريبت دون أي تلخيص أو تغيير.\n"
-            "5. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
-            "6. صياغة عنوان جذاب جداً ومثير للاهتمام (Catchy Title) لكل مقطع.\n"
-            "7. تنبيه هام جداً للمزامنة وقص الفيديوهات: عند تحديد وقت النهاية (end_time) لمقطع الشورت، احذر أن تدرج في السكريبت (script) أي جملة تبدأ في وقت النهاية أو بعده. فمثلاً، إذا كان وقت النهاية هو 03:06، فإن الجملة التي تبدأ بـ `[03:06]` أو `[03:06 -> 03:12]` تقع بعد وقت النهاية الفعلي للمقطع ولا يجب أن تظهر في السكريبت الخاص بهذا الشورت نهائياً، لأن الفيديو ينتهي عند 03:06 تماماً قبل نطق هذه الجملة.\n\n"
-            "النص المفرغ المراد تحليله:\n"
-            f"{req.transcription}"
-        )
-        
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, lambda: model.generate_content(prompt))
-        
-        import json
+    openrouter_key = req.openrouterApiKey or os.environ.get("OPENROUTER_API_KEY")
+    shorts_list = []
+
+    if openrouter_key and openrouter_key.strip():
+        print("🌐 Using OpenRouter (google/gemini-3.1-flash-lite) for suggest_shorts...", flush=True)
         try:
+            shorts_data = call_openrouter_shorts(req.transcription, req.numShorts, openrouter_key)
+            shorts_list = shorts_data.get("shorts", [])
+        except Exception as or_err:
+            print(f"⚠️ OpenRouter failed: {or_err}. Falling back to direct Gemini API...", flush=True)
+
+    if not shorts_list:
+        if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
+            raise HTTPException(status_code=400, detail="Gemini / OpenRouter API key is missing or invalid.")
+        try:
+            genai.configure(api_key=req.geminiApiKey)
+            model = genai.GenerativeModel(
+                model_name="gemini-3-flash-preview",
+                generation_config={
+                    "response_mime_type": "application/json",
+                    "response_schema": ShortsResponse
+                }
+            )
+            prompt = (
+                "أنت خبير محترف في صناعة المحتوى الفيروسي ومقاطع الفيديو القصيرة.\n"
+                f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة بين 30 ثانية لدقيقتين:\n\n"
+                f"{req.transcription}"
+            )
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, lambda: model.generate_content(prompt))
+            import json
             shorts_data = json.loads(response.text)
             shorts_list = shorts_data.get("shorts", [])
-            max_secs = get_max_transcription_seconds(req.transcription)
-            for s in shorts_list:
-                s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
-                s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
-                
-                # Rebuild/trim script using the normalized times and transcription to guarantee perfect boundary matching!
-                s["script"] = rebuild_script_for_short(
-                    transcription=req.transcription,
-                    start_time=s["start_time"],
-                    end_time=s["end_time"],
-                    fallback_script=s.get("script", "")
-                )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
-                # Post-process hook to guarantee it strictly matches the exact opening sentence of the short clip
-                script_text = s.get("script", "").strip()
-                if script_text:
-                    first_clause = re.split(r'[.!\?\n]', script_text)[0].strip()
-                    if first_clause:
-                        s["hook"] = first_clause
+    max_secs = get_max_transcription_seconds(req.transcription)
+    for s in shorts_list:
+        s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
+        s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+        s["script"] = rebuild_script_for_short(
+            transcription=req.transcription,
+            start_time=s["start_time"],
+            end_time=s["end_time"],
+            fallback_script=s.get("script", "")
+        )
+        script_text = s.get("script", "").strip()
+        if script_text:
+            first_clause = re.split(r'[.!\?\n]', script_text)[0].strip()
+            if first_clause:
+                s["hook"] = first_clause
 
-                
-            return {
-                "status": "success",
-                "shorts": shorts_list
-            }
-        except Exception as parse_err:
-            print(f"Failed to parse Gemini JSON: {parse_err}. Raw response: {response.text}", flush=True)
-            raise Exception("Failed to parse AI response into structured shorts format.")
-            
-    except Exception as e:
-        print(f"Failed to suggest shorts: {e}", flush=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "status": "success",
+        "shorts": shorts_list
+    }
 
 
 def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
@@ -763,35 +802,48 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
     try:
         TASKS[task_id] = {"status": "processing", "progress": f"✨ جاري تحليل النص بالذكاء الاصطناعي واقتراح {req.numShorts} مقاطع Shorts..."}
 
-        genai.configure(api_key=req.geminiApiKey)
-        model = genai.GenerativeModel(
-            model_name="gemini-3-flash-preview",
-            generation_config={
-                "response_mime_type": "application/json",
-                "response_schema": ShortsResponse
-            }
-        )
+        openrouter_key = req.openrouterApiKey or os.environ.get("OPENROUTER_API_KEY")
+        shorts_list = []
 
-        prompt = (
-            "أنت خبير محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
-            f"قم بتحليل النص المفرغ التالي (الذي يحتوي على توقيتات دقيقة)، واستخرج منه أفضل {req.numShorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
-            "شروط استخراج كل مقطع:\n"
-            "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق. لا تخترع توقيتات جديدة.\n"
-            "2. اكتب أوقات البداية والنهاية كما هي مكتوبة في النص المفرغ تماماً دون أي تعديل أو تحويل (مثال: 05:47 أو 12:30).\n"
-            "3. يجب أن تتراوح مدة كل مقطع بين 30 ثانية إلى 120 ثانية (دقيقتين كحد أقصى) إذا احتاج المقطع ذلك لاكتمال المعنى والمعالجة.\n"
-            "4. يجب تحديد 'الخطاف' (Hook) وهو أول جملة نطقها المتحدث في أول 3 ثوانٍ بنفس المقطع تماماً وبنفس الكلمات المكتوبة في السكريبت دون أي تلخيص أو تغيير.\n"
-            "5. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
-            "6. صياغة عنوان جذاب جداً ومثير للاهتمام (Catchy Title) لكل مقطع.\n"
-            "7. تنبيه هام جداً للمزامنة وقص الفيديوهات: عند تحديد وقت النهاية (end_time) لمقطع الشورت، احذر أن تدرج في السكريبت (script) أي جملة تبدأ في وقت النهاية أو بعده. فمثلاً، إذا كان وقت النهاية هو 03:06، فإن الجملة التي تبدأ بـ `[03:06]` أو `[03:06 -> 03:12]` تقع بعد وقت النهاية الفعلي للمقطع ولا يجب أن تظهر في السكريبت الخاص بهذا الشورت نهائياً، لأن الفيديو ينتهي عند 03:06 تماماً قبل نطق هذه الجملة.\n\n"
-            "النص المفرغ المراد تحليله:\n"
-            f"{req.transcription}"
-        )
+        if openrouter_key and openrouter_key.strip():
+            print(f"[{task_id}] 🌐 Using OpenRouter (google/gemini-3.1-flash-lite)...", flush=True)
+            try:
+                shorts_data = call_openrouter_shorts(req.transcription, req.numShorts, openrouter_key)
+                shorts_list = shorts_data.get("shorts", [])
+            except Exception as or_err:
+                print(f"[{task_id}] ⚠️ OpenRouter failed: {or_err}. Falling back to direct Gemini API...", flush=True)
 
-        response = model.generate_content(prompt)
+        if not shorts_list:
+            print(f"[{task_id}] Using direct Gemini API...", flush=True)
+            genai.configure(api_key=req.geminiApiKey)
+            model = genai.GenerativeModel(
+                model_name="gemini-3-flash-preview",
+                generation_config={
+                    "response_mime_type": "application/json",
+                    "response_schema": ShortsResponse
+                }
+            )
 
-        import json
-        shorts_data = json.loads(response.text)
-        shorts_list = shorts_data.get("shorts", [])
+            prompt = (
+                "أنت خبير محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
+                f"قم بتحليل النص المفرغ التالي (الذي يحتوي على توقيتات دقيقة)، واستخرج منه أفضل {req.numShorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
+                "شروط استخراج كل مقطع:\n"
+                "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق. لا تخترع توقيتات جديدة.\n"
+                "2. اكتب أوقات البداية والنهاية كما هي مكتوبة في النص المفرغ تماماً دون أي تعديل أو تحويل (مثال: 05:47 أو 12:30).\n"
+                "3. يجب أن تتراوح مدة كل مقطع بين 30 ثانية إلى 120 ثانية (دقيقتين كحد أقصى) إذا احتاج المقطع ذلك لاكتمال المعنى والمعالجة.\n"
+                "4. يجب تحديد 'الخطاف' (Hook) وهو أول جملة نطقها المتحدث في أول 3 ثوانٍ بنفس المقطع تماماً وبنفس الكلمات المكتوبة في السكريبت دون أي تلخيص أو تغيير.\n"
+                "5. يجب كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
+                "6. صياغة عنوان جذاب جداً ومثير للاهتمام (Catchy Title) لكل مقطع.\n\n"
+                "النص المفرغ المراد تحليله:\n"
+                f"{req.transcription}"
+            )
+
+            response = model.generate_content(prompt)
+
+            import json
+            shorts_data = json.loads(response.text)
+            shorts_list = shorts_data.get("shorts", [])
+
         max_secs = get_max_transcription_seconds(req.transcription)
         for s in shorts_list:
             s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
