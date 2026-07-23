@@ -29,9 +29,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure public directory exists
+# Ensure public and temp directories exist
 PUBLIC_DIR = os.path.abspath("public")
+TEMP_DIR = os.path.abspath("temp")
 os.makedirs(PUBLIC_DIR, exist_ok=True)
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Mount public folder to serve downloaded audio files statically
 app.mount("/public", StaticFiles(directory=PUBLIC_DIR), name="public")
@@ -58,8 +60,6 @@ def init_cookies():
                 print(f"⚠️ Failed to copy local cookies.txt: {e}", flush=True)
         else:
             print("⚠️ Warning: No cookies.txt found in project root or YOUTUBE_COOKIES env variable!", flush=True)
-
-init_cookies()
 
 def cleanup_old_temp_files(max_age_seconds: int = 172800):
     """Clean up temp folders and rendered videos older than 48 hours."""
@@ -323,10 +323,14 @@ def extract_video_id(url: str) -> str | None:
     match = re.search(pattern, url)
     return match.group(1) if match else None
 
-def download_audio_via_rapidapi(youtube_url: str, output_path: str) -> str:
+def download_audio_via_rapidapi(youtube_url: str, output_path: str, task_id: str = None) -> str:
     video_id = extract_video_id(youtube_url)
     if not video_id:
         raise Exception("رابط الفيديو غير صالح!")
+
+    def update_task(msg):
+        if task_id and task_id in TASKS:
+            TASKS[task_id]["progress"] = msg
 
     RAPID_API_KEY = os.environ.get("RAPID_API_KEY", "78aaeed1d3mshdc777f49020e221p1803c4jsn35138c026a86")
 
@@ -336,59 +340,58 @@ def download_audio_via_rapidapi(youtube_url: str, output_path: str) -> str:
         'Content-Type': 'application/json'
     }
 
-    # 1. إرسال طلب البدء بالتحويل والحصول على الـ Task ID
+    update_task("🌐 جارٍ طلب تحويل الصوت من خادم RapidAPI...")
     print(f"[*] Sending download request to RapidAPI for video ID: {video_id}...", flush=True)
     api_url = "https://youtube-mp4-mp3-downloader.p.rapidapi.com/api/v1/download"
     params = {
         'format': 'mp3',
         'id': video_id,
-        'audioQuality': '251',
+        'audioQuality': '128',
         'addInfo': 'false',
-        'allowExtendedDuration': 'false'
+        'allowExtendedDuration': 'true'
     }
 
-    response = requests.get(api_url, headers=headers, params=params)
+    response = requests.get(api_url, headers=headers, params=params, timeout=15)
     if response.status_code != 200:
         raise Exception(f"Failed to start conversion. Status code: {response.status_code}. Detail: {response.text}")
     
     res_data = response.json()
-    task_id = res_data.get('progressId') or res_data.get('id')
-    if not task_id:
+    rapid_task_id = res_data.get('progressId') or res_data.get('id')
+    if not rapid_task_id:
         raise Exception(f"Task ID not found in response: {res_data}")
 
-    print(f"[+] Conversion started. Task ID: {task_id}", flush=True)
+    print(f"[+] RapidAPI Conversion started. Task ID: {rapid_task_id}", flush=True)
 
-    # 2. Polling loop
     progress_url = "https://youtube-mp4-mp3-downloader.p.rapidapi.com/api/v1/progress"
     download_url = None
-    max_retries = 60  # 5 minutes max
+    max_retries = 25  # 25 * 3s = 75 seconds max timeout
     
     for attempt in range(max_retries):
-        print(f"[*] Checking conversion progress... (attempt {attempt + 1})", flush=True)
+        prog_percent = min(90, int(((attempt + 1) / max_retries) * 100))
+        update_task(f"🌐 جارٍ تجهيز وتحميل ملف الصوت عبر السيرفر ({prog_percent}%)...")
+        print(f"[*] Checking conversion progress... (attempt {attempt + 1}/{max_retries})", flush=True)
         
-        progress_res = requests.get(progress_url, headers=headers, params={'id': task_id})
-        if progress_res.status_code != 200:
-            print(f"⚠️ Progress request failed: {progress_res.status_code}. Retrying...", flush=True)
-            time.sleep(5)
-            continue
-            
-        progress_data = progress_res.json()
-        
-        if progress_data.get('finished') is True or progress_data.get('status') == 'Finished':
-            download_url = progress_data.get('downloadUrl')
-            print(f"🎉 Conversion finished on RapidAPI server!", flush=True)
-            break
-        elif progress_data.get('status') in ['Failed', 'Error']:
-            raise Exception(f"Conversion failed on RapidAPI server: {progress_data}")
-            
-        time.sleep(5)
+        try:
+            progress_res = requests.get(progress_url, headers=headers, params={'id': rapid_task_id}, timeout=10)
+            if progress_res.status_code == 200:
+                progress_data = progress_res.json()
+                if progress_data.get('finished') is True or progress_data.get('status') == 'Finished':
+                    download_url = progress_data.get('downloadUrl')
+                    print(f"🎉 Conversion finished on RapidAPI server!", flush=True)
+                    break
+                elif progress_data.get('status') in ['Failed', 'Error']:
+                    raise Exception(f"Conversion failed on RapidAPI server: {progress_data}")
+        except Exception as pe:
+            print(f"⚠️ RapidAPI progress check warning: {pe}", flush=True)
+
+        time.sleep(3)
 
     if not download_url:
-        raise Exception("Timeout waiting for conversion to finish on RapidAPI.")
+        raise Exception("استغرق خادم التحويل وقتاً طويلاً. يرجى المحاولة مرة أخرى أو استخدام فيديو أقصر.")
 
-    # 3. Download the converted MP3 file
+    update_task("📥 جارٍ تنزيل ملف MP3 الأصلي...")
     print("[*] Downloading MP3 file from RapidAPI...", flush=True)
-    audio_res = requests.get(download_url, stream=True)
+    audio_res = requests.get(download_url, stream=True, timeout=60)
     if audio_res.status_code != 200:
         raise Exception(f"Failed to download audio file. Status: {audio_res.status_code}")
         
@@ -400,37 +403,75 @@ def download_audio_via_rapidapi(youtube_url: str, output_path: str) -> str:
     print("[+] Audio downloaded and saved successfully.", flush=True)
     return output_path
 
-def download_audio_smart(youtube_url: str, output_path: str) -> str:
+def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None) -> str:
     """
-    Downloads YouTube audio fast via direct yt-dlp extraction (takes 2-4 seconds).
-    If yt-dlp fails or stalls (e.g. YouTube anti-bot restriction), falls back smoothly to RapidAPI in 18 seconds max.
+    Downloads YouTube audio fast via direct stream extraction (takes 3-5 seconds for long videos).
+    If yt-dlp fails or stalls, falls back smoothly to RapidAPI with real-time status.
     """
-    print(f"⚡ Attempting fast direct audio extraction via yt-dlp...", flush=True)
+    def update_task(msg):
+        if task_id and task_id in TASKS:
+            TASKS[task_id]["progress"] = msg
+
+    update_task("⚡ جاري استخراج وتنزيل الصوت مباشرة بـ yt-dlp...")
+    print(f"⚡ Attempting fast direct audio extraction via yt-dlp for {youtube_url}...", flush=True)
+
     try:
+        raw_temp_audio = output_path + ".raw"
         ytdl_cmd = [
             'yt-dlp',
             '--quiet', '--no-warnings',
             '--no-playlist',
-            '--socket-timeout', '10',
-            '-x', '--audio-format', 'mp3',
-            '--audio-quality', '0',
-            '-o', output_path
+            '--socket-timeout', '15',
+            '--concurrent-fragments', '4',
+            '-f', 'bestaudio[ext=m4a]/bestaudio/best',
+            '-o', raw_temp_audio
         ]
         if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
             ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
         ytdl_cmd.append(youtube_url)
 
-        res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=18)
-        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            print("🚀 Fast audio download via yt-dlp succeeded!", flush=True)
-            return output_path
+        res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=75)
+
+        downloaded_file = None
+        if os.path.exists(raw_temp_audio):
+            downloaded_file = raw_temp_audio
         else:
-            err_msg = res.stderr.strip() if res.stderr else "yt-dlp returned non-zero code or empty file"
-            print(f"⚠️ Direct yt-dlp extraction failed ({err_msg}). Falling back to RapidAPI...", flush=True)
+            parent_dir = os.path.dirname(raw_temp_audio)
+            base_name = os.path.basename(raw_temp_audio)
+            for f in os.listdir(parent_dir):
+                if f.startswith(base_name):
+                    downloaded_file = os.path.join(parent_dir, f)
+                    break
+
+        if downloaded_file and os.path.exists(downloaded_file) and os.path.getsize(downloaded_file) > 0:
+            update_task("⚡ جارٍ تحويل كودك الصوت إلى MP3 بسرعة...")
+            print(f"🚀 Audio stream downloaded ({os.path.getsize(downloaded_file)} bytes). Fast converting to MP3 via ffmpeg...", flush=True)
+            
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',
+                '-i', downloaded_file,
+                '-ac', '1',
+                '-ar', '16000',
+                '-b:a', '64k',
+                output_path
+            ]
+            ff_res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+            
+            try: os.remove(downloaded_file)
+            except: pass
+
+            if ff_res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                print("🎉 Direct audio extraction succeeded!", flush=True)
+                return output_path
+
+        err_msg = res.stderr.strip() if res.stderr else "yt-dlp returned non-zero code or empty file"
+        print(f"⚠️ Direct yt-dlp extraction failed ({err_msg}). Falling back to RapidAPI...", flush=True)
+
     except Exception as e:
         print(f"⚠️ Direct yt-dlp extraction error ({e}). Falling back to RapidAPI...", flush=True)
 
-    return download_audio_via_rapidapi(youtube_url, output_path)
+    update_task("🌐 جارٍ استخراج الصوت عبر خادم التنزيل السريع (RapidAPI)...")
+    return download_audio_via_rapidapi(youtube_url, output_path, task_id)
 
 # دالة لضبط التوقيتات برمجياً (رياضياً)
 def adjust_timestamps(text: str, offset_minutes: int) -> str:
@@ -614,12 +655,14 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
         audio_path = os.path.join(task_dir, "audio.mp3")
         
         print(f"[{task_id}] Background: Downloading YouTube audio smartly...", flush=True)
-        download_audio_smart(youtube_url, audio_path)
+        TASKS[task_id]["progress"] = "📥 جاري تحميل صوت اليوتيوب..."
+        download_audio_smart(youtube_url, audio_path, task_id=task_id)
         
-        if not os.path.exists(audio_path):
+        if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
             raise Exception("فشل تحميل ملف الصوت من السيرفر.")
             
         print(f"[{task_id}] Background: Transcribing audio with Gemini...", flush=True)
+        TASKS[task_id]["progress"] = "✨ جاري تفريغ الصوت وتقسيمه بالذكاء الاصطناعي..."
         transcription_text = transcribe_audio_with_gemini(
             audio_path=audio_path,
             api_key=gemini_api_key,
@@ -629,36 +672,14 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
         # Success
         TASKS[task_id].update({
             "status": "success",
-            "progress": "اكتمل بنجاح!",
+            "progress": "اكتمل بنجاح! 🎉",
             "audioUrl": f"public/temp_{task_id}/audio.mp3",
             "transcription": transcription_text
         })
         
     except Exception as e:
-        clean_temp_dir(task_dir)
         print(f"[{task_id}] Background process failed: {e}", flush=True)
-        
-        if not os.path.exists(audio_path):
-            raise Exception("فشل تحميل ملف الصوت من السيرفر.")
-            
-        print(f"[{task_id}] Background: Transcribing audio with Gemini...", flush=True)
-        transcription_text = transcribe_audio_with_gemini(
-            audio_path=audio_path,
-            api_key=gemini_api_key,
-            task_id=task_id
-        )
-        
-        # Success
-        TASKS[task_id].update({
-            "status": "success",
-            "progress": "اكتمل بنجاح!",
-            "audioUrl": f"public/temp_{task_id}/audio.mp3",
-            "transcription": transcription_text
-        })
-        
-    except Exception as e:
         clean_temp_dir(task_dir)
-        print(f"[{task_id}] Background process failed: {e}", flush=True)
         TASKS[task_id].update({
             "status": "failed",
             "progress": f"فشل: {str(e)}",
