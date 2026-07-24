@@ -848,6 +848,76 @@ async def suggest_shorts(req: SuggestShortsRequest):
         except Exception as or_err:
             print(f"⚠️ OpenRouter failed: {or_err}. Falling back to direct Gemini API...", flush=True)
 
+@app.post("/api/transcribe-cohere")
+async def transcribe_cohere_endpoint(file: UploadFile = File(...)):
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(TEMP_DIR, f"temp_{task_id}")
+    os.makedirs(task_dir, exist_ok=True)
+    
+    audio_ext = os.path.splitext(file.filename)[1] or ".mp3"
+    audio_path = os.path.join(task_dir, f"audio{audio_ext}")
+    with open(audio_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    try:
+        import base64
+        import requests
+        import json
+        
+        with open(audio_path, "rb") as f:
+            audio_bytes = f.read()
+            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+            
+        gradio_urls = [
+            "https://ahmedyehia-cohere-arabic-asr.hf.space/api/predict",
+            "https://ahmedyehia-cohere-arabic-asr.hf.space/call/predict"
+        ]
+        
+        last_error = None
+        for g_url in gradio_urls:
+            try:
+                payload = {
+                    "data": [
+                        {
+                            "name": file.filename,
+                            "data": f"data:audio/mp3;base64,{audio_b64}"
+                        }
+                    ]
+                }
+                res = requests.post(g_url, json=payload, timeout=90)
+                if res.status_code == 200:
+                    res_data = res.json()
+                    if "data" in res_data and len(res_data["data"]) > 0:
+                        shutil.rmtree(task_dir, ignore_errors=True)
+                        return {"status": "success", "text": res_data["data"][0]}
+                    elif "event_id" in res_data:
+                        event_id = res_data["event_id"]
+                        res_event = requests.get(f"https://ahmedyehia-cohere-arabic-asr.hf.space/call/predict/{event_id}", timeout=90)
+                        if res_event.status_code == 200:
+                            event_text = res_event.text
+                            final_t = ""
+                            for line in event_text.split("\n"):
+                                if line.startswith("data:"):
+                                    try:
+                                        arr = json.loads(line.replace("data:", "").strip())
+                                        if isinstance(arr, list) and len(arr) > 0:
+                                            final_t = arr[0]
+                                    except Exception:
+                                        pass
+                            shutil.rmtree(task_dir, ignore_errors=True)
+                            return {"status": "success", "text": final_t or event_text}
+                last_error = f"Status {res.status_code}: {res.text[:150]}"
+            except Exception as e:
+                last_error = str(e)
+                
+        shutil.rmtree(task_dir, ignore_errors=True)
+        raise Exception(f"فشل الاتصال بنواة Cohere: {last_error}")
+    except Exception as e:
+        shutil.rmtree(task_dir, ignore_errors=True)
+        print(f"[{task_id}] Cohere ASR error: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
     if not shorts_list:
         if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
             raise HTTPException(status_code=400, detail="Gemini / OpenRouter API key is missing or invalid.")
