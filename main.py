@@ -450,9 +450,8 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
             ffmpeg_cmd = [
                 'ffmpeg', '-y',
                 '-i', downloaded_file,
-                '-ac', '1',
-                '-ar', '16000',
-                '-b:a', '64k',
+                '-ar', '44100',
+                '-b:a', '192k',
                 output_path
             ]
             ff_res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
@@ -634,8 +633,6 @@ async def schedule_dir_cleanup(path: str, delay_seconds: int = 600):
 
 @app.get("/")
 def read_root():
-    if os.path.exists("index.html"):
-        return FileResponse("index.html")
     exists = os.path.exists(COOKIE_FILE_PATH)
     size = os.path.getsize(COOKIE_FILE_PATH) if exists else 0
     return {
@@ -645,18 +642,6 @@ def read_root():
         "cookies_size_bytes": size,
         "files_in_dir": os.listdir(".")
     }
-
-@app.get("/app.js")
-def get_app_js():
-    if os.path.exists("app.js"):
-        return FileResponse("app.js", media_type="application/javascript")
-    raise HTTPException(status_code=404, detail="app.js not found")
-
-@app.get("/style.css")
-def get_style_css():
-    if os.path.exists("style.css"):
-        return FileResponse("style.css", media_type="text/css")
-    raise HTTPException(status_code=404, detail="style.css not found")
 
 def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key: str, task_dir: str):
     # To prevent memory leak, keep TASKS size under control
