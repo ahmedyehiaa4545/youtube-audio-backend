@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+yt-dlp
+google-generativeai
+pydub
+requests
+opencv-python-headless
+scenedetect
+protobuf>=4.25.3,<5.0.0
+mediapipe==0.10.14
