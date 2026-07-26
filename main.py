@@ -368,79 +368,86 @@ def snap_to_transcript_boundary(target_sec: float, segments: list, snap_mode: st
 
     return best_time if best_diff <= max_snap_sec else target_sec
 
+
 import difflib
 
-def build_word_timeline(segments: list[dict]) -> list[dict]:
-    """
-    Build a word-level timeline: for each word in the transcript,
-    estimate its start/end time by linearly interpolating within its segment.
-    """
-    timeline = []
-    for seg in segments:
-        raw_words = seg.get("text", "").split()
-        n = len(raw_words)
-        if n == 0:
-            continue
-        seg_dur = max(0.1, seg["end"] - seg["start"])
-        word_dur = seg_dur / n
-        for i, raw_w in enumerate(raw_words):
-            nw = normalize_words_for_matching(raw_w)
-            if not nw:
-                continue
-            w_start = seg["start"] + (i * word_dur)
-            w_end = seg["start"] + ((i + 1) * word_dur)
-            timeline.append({
-                "word": nw[0],
-                "start": round(w_start, 3),
-                "end": round(w_end, 3),
-            })
-    return timeline
+def build_word_map(segments: list[dict]) -> list[tuple[str, int]]:
+    word_map = []
+    for idx, seg in enumerate(segments):
+        for w in normalize_words_for_matching(seg.get("text", "")):
+            word_map.append((w, idx))
+    return word_map
 
-def locate_script_word_level(segments: list[dict], script_text: str, min_anchor: int = 2) -> dict | None:
+def locate_exact_words_in_transcript(segments: list[dict], script_text: str) -> tuple[float, float] | None:
     """
-    Find the exact word-level start and end times of a script within the transcript.
-    Returns {"start": float, "end": float} or None.
+    Calculates exact sub-segment timestamps for the starting and ending words
+    by interpolating word character positions inside each transcript segment duration.
+    This guarantees that if a sentence starts mid-segment, previous words in that segment are omitted!
     """
-    timeline = build_word_timeline(segments)
+    all_words = []
+    for seg in segments:
+        seg_text = seg.get("text", "")
+        if not seg_text.strip():
+            continue
+        seg_start = seg["start"]
+        seg_end = seg["end"]
+        seg_dur = max(0.2, seg_end - seg_start)
+        total_len = len(seg_text)
+
+        matches = list(re.finditer(r'[^\s!؟.,،؛:?!()"\'-]+', seg_text))
+        if not matches:
+            continue
+        
+        for m in matches:
+            raw_w = m.group(0)
+            norm_w_list = normalize_words_for_matching(raw_w)
+            if not norm_w_list:
+                continue
+            norm_w = norm_w_list[0]
+            
+            # Sub-segment character position interpolation
+            w_start = seg_start + (m.start() / total_len) * seg_dur
+            w_end = seg_start + (m.end() / total_len) * seg_dur
+            all_words.append({
+                "word": norm_w,
+                "start": w_start,
+                "end": w_end
+            })
+
     script_words = normalize_words_for_matching(script_text)
-    if not timeline or len(script_words) < min_anchor:
+    if not all_words or len(script_words) < 2:
         return None
 
-    transcript_words = [t["word"] for t in timeline]
-    sm = difflib.SequenceMatcher(None, script_words, transcript_words, autojunk=False)
-    blocks = [b for b in sm.get_matching_blocks() if b.size >= min_anchor]
+    t_words = [w["word"] for w in all_words]
+    sm = difflib.SequenceMatcher(None, script_words, t_words, autojunk=False)
+    blocks = [b for b in sm.get_matching_blocks() if b.size >= 2]
     if not blocks:
         return None
 
-    # Find start block (matching beginning of script)
     start_blocks = [b for b in blocks if b.a <= 3]
+    end_blocks = [b for b in blocks if b.a + b.size >= len(script_words) - 3]
     if not start_blocks:
         start_blocks = blocks[:1]
-    first = max(start_blocks, key=lambda b: b.size)
-
-    # Find end block (matching end of script)
-    end_blocks = [b for b in blocks if b.a + b.size >= len(script_words) - 3]
     if not end_blocks:
         end_blocks = blocks[-1:]
+
+    first = max(start_blocks, key=lambda b: b.size)
     last = max(end_blocks, key=lambda b: b.size)
 
-    first_word_idx = first.b
-    last_word_idx = last.b + last.size - 1
+    start_idx = first.b
+    end_idx = last.b + last.size - 1
 
-    if last_word_idx < first_word_idx:
+    if end_idx < start_idx:
         return None
 
-    return {
-        "start": timeline[first_word_idx]["start"],
-        "end": timeline[last_word_idx]["end"],
-    }
+    return all_words[start_idx]["start"], all_words[end_idx]["end"]
 
 
-def rebuild_script_for_short(transcription: str, start_time: str, end_time: str, fallback_script: str) -> tuple[str, str, str]:
+def rebuild_script_for_short(transcription: str, start_time: str, end_time: str, fallback_script: str, start_pad: float = 0.0, end_pad: float = 0.25) -> tuple[str, str, str]:
     """
     Returns (script_text, snapped_start_time, snapped_end_time)
-    Uses word-level timeline interpolation for sub-segment precision.
-    The script text is the primary reference, AI timestamps are fallback only.
+    Prioritizes word-level sequence matching (locate_exact_words_in_transcript) in the transcript,
+    falling back to timestamp snapping if text matching is not conclusive.
     """
     try:
         start_sec = parse_time_to_seconds(start_time)
@@ -452,13 +459,12 @@ def rebuild_script_for_short(transcription: str, start_time: str, end_time: str,
 
     segments = parse_transcription_segments(transcription)
 
-    # 1) Primary: Word-level text matching (sub-segment precision)
-    result = locate_script_word_level(segments, fallback_script)
-    if result:
-        snapped_start = result["start"]
-        snapped_end = result["end"]
+    # 1) Primary Method: Sub-segment character/word level exact matching
+    located = locate_exact_words_in_transcript(segments, fallback_script)
+    if located:
+        snapped_start, snapped_end = located
     else:
-        # 2) Fallback: timestamp-guided snapping
+        # 2) Fallback: Timestamp-guided snapping
         snapped_start = snap_to_transcript_boundary(start_sec, segments, snap_mode="start", max_snap_sec=7.0, text_hint=fallback_script)
         snapped_end   = snap_to_transcript_boundary(end_sec,   segments, snap_mode="end",   max_snap_sec=7.0, text_hint=fallback_script)
 
@@ -468,8 +474,8 @@ def rebuild_script_for_short(transcription: str, start_time: str, end_time: str,
         if snapped_start >= snapped_end:
             snapped_end = snapped_start + 30.0
 
-    # Small end padding only (no start padding to avoid bleeding into previous sentence)
-    snapped_end += 0.25
+    snapped_start = max(0.0, snapped_start - start_pad)
+    snapped_end = snapped_end + end_pad
 
     matching_texts = []
     for seg in segments:
@@ -479,7 +485,10 @@ def rebuild_script_for_short(transcription: str, start_time: str, end_time: str,
     rebuilt = " ".join(matching_texts).strip()
     script = rebuilt if rebuilt else fallback_script
 
-    return script, format_seconds_to_time_str(snapped_start), format_seconds_to_time_str(snapped_end)
+    start_str = format_seconds_to_time_str(snapped_start)
+    end_str   = format_seconds_to_time_str(snapped_end)
+
+    return script, start_str, end_str
 
 
 def extract_video_id(url: str) -> str | None:
