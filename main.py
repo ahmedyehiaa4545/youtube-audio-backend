@@ -397,13 +397,10 @@ def locate_exact_words_in_transcript(segments: list[dict], script_text: str) -> 
 
     start_blocks = [b for b in blocks if b.a <= 3]
     end_blocks = [b for b in blocks if b.a + b.size >= len(script_words) - 3]
-    if not start_blocks:
-        start_blocks = blocks[:1]
-    if not end_blocks:
-        end_blocks = blocks[-1:]
-
-    first = max(start_blocks, key=lambda b: b.size)
-    last = max(end_blocks, key=lambda b: b.size)
+    # Pick the block that starts EARLIEST in the transcript (minimum transcript word index b.b)
+    first = min(blocks, key=lambda b: b.b)
+    # Pick the block that ends LATEST in the transcript (maximum transcript word index b.b + b.size)
+    last = max(blocks, key=lambda b: b.b + b.size)
 
     start_word_idx = first.b
     end_word_idx = last.b + last.size - 1
