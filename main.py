@@ -87,7 +87,6 @@ cleanup_old_temp_files()
 class DownloadRequest(BaseModel):
     youtubeUrl: str
     geminiApiKey: str | None = None
-    groqApiKey: str | None = None
 
 class ShortSuggestion(BaseModel):
     title: str = Field(description="عنوان جذاب ومثير للمقطع القصير")
@@ -133,7 +132,7 @@ def parse_time_to_seconds(time_str: str) -> float:
 
 def get_max_transcription_seconds(transcription: str) -> float:
     """Scan transcription to find the maximum timestamp in it"""
-    pattern = r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s*->\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s*\]'
+    pattern = r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*->\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]'
     matches = re.findall(pattern, transcription)
     max_secs = 0.0
     for start, end in matches:
@@ -143,46 +142,34 @@ def get_max_transcription_seconds(transcription: str) -> float:
             pass
     return max_secs
 
-def format_seconds_to_time_str(seconds: float) -> str:
-    """Convert seconds to MM:SS.mmm or HH:MM:SS.mmm format"""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = seconds % 60
-    if h > 0:
-        return f"{h:02d}:{m:02d}:{s:06.3f}"
-    return f"{m:02d}:{s:06.3f}"
-
 def normalize_time_str(time_str: str, max_secs: float = 0.0) -> str:
-    """Normalize any time format (HH:MM:SS.mmm, MM:SS.mmm, raw seconds) to consistent format.
-    Returns MM:SS.mmm for times under 1 hour, HH:MM:SS.mmm for longer.
-    Corrects common AI mapping errors (e.g. AI writes 03:34:48 meaning 3min34sec480ms not 3hr34min).
+    """Normalize any time format (HH:MM:SS, MM:SS, raw seconds) to standard HH:MM:SS format.
+    If the parsed seconds exceed max_secs, corrects common AI mapping errors (e.g. HH:MM:00 -> 00:HH:MM).
     """
     try:
-        parts = time_str.strip().split(':')
+        # Detect and fix mapping error if max_secs is provided
+        parts = time_str.split(':')
         if max_secs > 0 and len(parts) == 3:
             try:
-                h = int(parts[0])
-                m = int(parts[1])
-                s = float(parts[2])
+                h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
                 parsed_secs = h * 3600 + m * 60 + s
-                # If parsed duration is way too long, AI wrote HH:MM:SS or MM:SS:SS when it meant MM:SS.mmm
-                if parsed_secs > max_secs * 1.1:
-                    shifted_secs = h * 60 + m + (s / 1000.0 if s >= 60 else s / 60.0 if s >= 1.0 else 0)
-                    if shifted_secs <= max_secs and shifted_secs > 0:
-                        return format_seconds_to_time_str(shifted_secs)
+                # If parsed duration is way too long, try shifting right
+                if parsed_secs > max_secs * 1.2:
+                    shifted_secs = h * 60 + m
+                    if shifted_secs <= max_secs:
+                        seconds = shifted_secs
+                        h_new = int(seconds // 3600)
+                        m_new = int((seconds % 3600) // 60)
+                        s_new = int(seconds % 60)
+                        return f"{h_new:02d}:{m_new:02d}:{s_new:02d}"
             except Exception:
                 pass
 
         seconds = parse_time_to_seconds(time_str)
-        if max_secs > 0 and seconds > max_secs * 1.1 and len(parts) == 3:
-            # Secondary check: if parse_time_to_seconds gave > max_secs
-            h = int(parts[0])
-            m = int(parts[1])
-            shifted_secs = h * 60 + m
-            if shifted_secs <= max_secs:
-                return format_seconds_to_time_str(shifted_secs)
-
-        return format_seconds_to_time_str(seconds)
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
     except Exception:
         return time_str
 
@@ -314,154 +301,22 @@ def parse_transcription_segments(transcription: str):
                 
     return segments
 
-def normalize_words_for_matching(text: str) -> list[str]:
-    if not text:
-        return []
-    cleaned = re.sub(r'\[.*?\]|[!؟.,،؛:?!()"\'-]', ' ', text)
-    cleaned = re.sub(r'[أإآٱ]', 'ا', cleaned)
-    cleaned = cleaned.replace('ة', 'ه').replace('ى', 'ي')
-    return [w.lower() for w in cleaned.split() if len(w) >= 2]
-
-def snap_to_transcript_boundary(target_sec: float, segments: list, snap_mode: str = "start", max_snap_sec: float = 7.0, text_hint: str = "") -> float:
-    """
-    Snaps a timestamp to the nearest actual segment boundary in the transcript.
-    Uses both timestamp proximity AND text matching with AI suggested script (text_hint)
-    to pick the exact right segment boundary even if AI timestamp is slightly off.
-    """
-    if not segments:
-        return target_sec
-
-    hint_words = normalize_words_for_matching(text_hint)
-    target_hint_words = hint_words[:8] if snap_mode == "start" else hint_words[-8:]
-    hint_set = set(target_hint_words)
-
-    best_time = target_sec
-    best_score = -1
-    best_diff = max_snap_sec + 1
-
-    for seg in segments:
-        candidate = seg["start"] if snap_mode == "start" else seg.get("end", seg["start"])
-        if candidate is None:
-            continue
-        diff = abs(candidate - target_sec)
-        if diff > max_snap_sec:
-            continue
-
-        # Calculate text match score
-        score = 0
-        if hint_set:
-            seg_words = normalize_words_for_matching(seg.get("text", ""))
-            overlap = len(set(seg_words) & hint_set)
-            if overlap > 0:
-                score += overlap * 2
-                # Extra bonus if very first/last word matches exactly
-                if snap_mode == "start" and seg_words and target_hint_words and seg_words[0] == target_hint_words[0]:
-                    score += 5
-                elif snap_mode == "end" and seg_words and target_hint_words and seg_words[-1] == target_hint_words[-1]:
-                    score += 5
-
-        # Pick segment with highest score, or if tied, smallest time diff
-        if score > best_score or (score == best_score and diff < best_diff):
-            best_score = score
-            best_diff = diff
-            best_time = candidate
-
-    return best_time if best_diff <= max_snap_sec else target_sec
-
-
-import difflib
-
-def build_word_map(segments: list[dict]) -> list[tuple[str, int]]:
-    word_map = []
-    for idx, seg in enumerate(segments):
-        for w in normalize_words_for_matching(seg.get("text", "")):
-            word_map.append((w, idx))
-    return word_map
-
-def locate_exact_words_in_transcript(segments: list[dict], script_text: str) -> tuple[float, float] | None:
-    """
-    Finds the full transcript sentence/segment where the script starts,
-    and snaps start_time to the exact start of that segment (segments[start_seg_idx]["start"]).
-    This guarantees that clips always start cleanly at the beginning of full sentences (e.g. 'إيش السلوك...', 'طيب...').
-    """
-    word_map = build_word_map(segments)
-    script_words = normalize_words_for_matching(script_text)
-    if not word_map or len(script_words) < 2:
-        return None
-
-    transcript_words = [w for w, _ in word_map]
-    sm = difflib.SequenceMatcher(None, script_words, transcript_words, autojunk=False)
-    blocks = [b for b in sm.get_matching_blocks() if b.size >= 2]
-    if not blocks:
-        return None
-
-    start_blocks = [b for b in blocks if b.a <= 3]
-    end_blocks = [b for b in blocks if b.a + b.size >= len(script_words) - 3]
-    # Pick the block that starts EARLIEST in the transcript (minimum transcript word index b.b)
-    first = min(blocks, key=lambda b: b.b)
-    # Pick the block that ends LATEST in the transcript (maximum transcript word index b.b + b.size)
-    last = max(blocks, key=lambda b: b.b + b.size)
-
-    start_word_idx = first.b
-    end_word_idx = last.b + last.size - 1
-
-    if end_word_idx < start_word_idx:
-        return None
-
-    start_seg_idx = word_map[start_word_idx][1]
-    end_seg_idx = word_map[end_word_idx][1]
-
-    # Return full segment start timestamp and full segment end timestamp
-    return segments[start_seg_idx]["start"], segments[end_seg_idx]["end"]
-
-
-def rebuild_script_for_short(transcription: str, start_time: str, end_time: str, fallback_script: str, start_pad: float = 0.0, end_pad: float = 0.25) -> tuple[str, str, str]:
-    """
-    Returns (script_text, snapped_start_time, snapped_end_time)
-    Prioritizes word-level sequence matching (locate_exact_words_in_transcript) in the transcript,
-    falling back to timestamp snapping if text matching is not conclusive.
-    """
+def rebuild_script_for_short(transcription: str, start_time: str, end_time: str, fallback_script: str) -> str:
     try:
         start_sec = parse_time_to_seconds(start_time)
         end_sec = parse_time_to_seconds(end_time)
-        if start_sec > end_sec:
-            start_sec, end_sec = end_sec, start_sec
     except Exception:
-        return fallback_script, start_time, end_time
+        return fallback_script
 
     segments = parse_transcription_segments(transcription)
-
-    # 1) Primary Method: Sub-segment character/word level exact matching
-    located = locate_exact_words_in_transcript(segments, fallback_script)
-    if located:
-        snapped_start, snapped_end = located
-    else:
-        # 2) Fallback: Timestamp-guided snapping
-        snapped_start = snap_to_transcript_boundary(start_sec, segments, snap_mode="start", max_snap_sec=7.0, text_hint=fallback_script)
-        snapped_end   = snap_to_transcript_boundary(end_sec,   segments, snap_mode="end",   max_snap_sec=7.0, text_hint=fallback_script)
-
-    if snapped_start >= snapped_end:
-        snapped_start = min(start_sec, end_sec)
-        snapped_end = max(start_sec, end_sec)
-        if snapped_start >= snapped_end:
-            snapped_end = snapped_start + 30.0
-
-    snapped_start = max(0.0, snapped_start - start_pad)
-    snapped_end = snapped_end + end_pad
-
     matching_texts = []
+    
     for seg in segments:
-        if seg["start"] < (snapped_end - 0.01) and seg["end"] > (snapped_start + 0.01):
+        if seg["start"] < (end_sec - 0.01) and seg["end"] > (start_sec + 0.01):
             matching_texts.append(seg["text"])
-
+            
     rebuilt = " ".join(matching_texts).strip()
-    script = rebuilt if rebuilt else fallback_script
-
-    start_str = format_seconds_to_time_str(snapped_start)
-    end_str   = format_seconds_to_time_str(snapped_end)
-
-    return script, start_str, end_str
-
+    return rebuilt if rebuilt else fallback_script
 
 def extract_video_id(url: str) -> str | None:
     pattern = r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:[^\/\n\s]+\/\S+\/|(?:v|e(?:mbed)?)\/|\S*?[?&]v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})'
@@ -650,124 +505,7 @@ def adjust_timestamps(text: str, offset_minutes: int) -> str:
     pattern_single = r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]'
     text = re.sub(pattern_single, lambda m: f"[{shift_time(m.group(1))}]", text)
     
-
-
-def transcribe_audio_with_groq_api(audio_file_path: str, groq_api_key: str) -> dict:
-    url = "https://api.groq.com/openai/v1/audio/transcriptions"
-    headers = {
-        "Authorization": f"Bearer {groq_api_key.strip()}"
-    }
-    with open(audio_file_path, "rb") as f:
-        files = {
-            "file": (os.path.basename(audio_file_path), f, "audio/mp3")
-        }
-        data = {
-            "model": "whisper-large-v3-turbo",
-            "response_format": "verbose_json",
-            "timestamp_granularities[]": "segment"
-        }
-        res = requests.post(url, headers=headers, files=files, data=data, timeout=180)
-        if res.status_code == 200:
-            return res.json()
-        else:
-            raise Exception(f"Groq API Error ({res.status_code}): {res.text}")
-
-def get_audio_duration_sec(audio_path: str) -> float:
-    try:
-        cmd = [
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            audio_path
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode == 0 and res.stdout.strip():
-            return float(res.stdout.strip())
-    except Exception:
-        pass
-    try:
-        cmd = ['ffmpeg', '-i', audio_path]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        match = re.search(r'Duration:\s*(\d+):(\d+):(\d+\.\d+)', res.stderr)
-        if match:
-            h, m, s = match.groups()
-            return int(h) * 3600 + int(m) * 60 + float(s)
-    except Exception:
-        pass
-    return 0.0
-
-def split_audio_ffmpeg(audio_path: str, task_dir: str, chunk_minutes: int = 10) -> list[tuple[int, float, str]]:
-    duration = get_audio_duration_sec(audio_path)
-    chunk_sec = chunk_minutes * 60
-    if duration <= 0:
-        duration = 3600 * 3
-        
-    chunks_info = []
-    start = 0.0
-    idx = 0
-    while start < duration:
-        chunk_filename = os.path.join(task_dir, f"groq_chunk_{idx}.mp3")
-        cmd = [
-            'ffmpeg', '-y',
-            '-ss', str(start),
-            '-i', audio_path,
-            '-t', str(chunk_sec),
-            '-acodec', 'libmp3lame',
-            '-ab', '64k',
-            chunk_filename
-        ]
-        res = subprocess.run(cmd, capture_output=True)
-        if os.path.exists(chunk_filename) and os.path.getsize(chunk_filename) > 0:
-            chunks_info.append((idx, start, chunk_filename))
-        else:
-            break
-        start += chunk_sec
-        idx += 1
-        
-    return chunks_info
-
-def transcribe_audio_full_groq(audio_path: str, groq_api_key: str, task_dir: str, chunk_minutes: int = 10) -> str:
-    file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-    print(f"[{task_dir}] Transcribing with Groq API (whisper-large-v3-turbo). Size: {file_size_mb:.2f} MB", flush=True)
-    
-    if file_size_mb <= 20:
-        res_dict = transcribe_audio_with_groq_api(audio_path, groq_api_key)
-        segments = res_dict.get("segments", [])
-        lines = []
-        for seg in segments:
-            start = seg.get("start", 0)
-            end = seg.get("end", 0)
-            text = seg.get("text", "").strip()
-            if text:
-                start_str = format_seconds_to_time_str(start)
-                end_str = format_seconds_to_time_str(end)
-                lines.append(f"[{start_str} -> {end_str}] : {text}")
-        return "\n".join(lines)
-    else:
-        print(f"[{task_dir}] Splitting large audio file ({file_size_mb:.1f} MB) using ffmpeg CLI (zero-RAM footprint)...", flush=True)
-        chunks_info = split_audio_ffmpeg(audio_path, task_dir, chunk_minutes=chunk_minutes)
-        all_lines = []
-        for idx, start_sec, chunk_filename in chunks_info:
-            try:
-                print(f"[{task_dir}] Transcribing chunk {idx+1}/{len(chunks_info)} via Groq API...", flush=True)
-                res_dict = transcribe_audio_with_groq_api(chunk_filename, groq_api_key)
-                segments = res_dict.get("segments", [])
-                for seg in segments:
-                    start = seg.get("start", 0) + start_sec
-                    end = seg.get("end", 0) + start_sec
-                    text = seg.get("text", "").strip()
-                    if text:
-                        start_str = format_seconds_to_time_str(start)
-                        end_str = format_seconds_to_time_str(end)
-                        all_lines.append(f"[{start_str} -> {end_str}] : {text}")
-            except Exception as chunk_err:
-                print(f"[{task_dir}] Chunk {idx+1} Groq transcribe error: {chunk_err}", flush=True)
-            finally:
-                if os.path.exists(chunk_filename):
-                    try: os.remove(chunk_filename)
-                    except: pass
-                    
-        return "\n".join(all_lines)
+    return text
 
 def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: int = 7, task_id: str = None) -> str:
     import concurrent.futures
@@ -905,7 +643,7 @@ def read_root():
         "files_in_dir": os.listdir(".")
     }
 
-def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key: str, task_dir: str, groq_api_key: str = None):
+def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key: str, task_dir: str):
     # To prevent memory leak, keep TASKS size under control
     if len(TASKS) > 200:
         keys_to_remove = list(TASKS.keys())[:50]
@@ -922,24 +660,13 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
             raise Exception("فشل تحميل ملف الصوت من السيرفر.")
             
-        groq_key = (groq_api_key and groq_api_key.strip()) or (gemini_api_key and gemini_api_key.strip()) or os.environ.get("GROQ_API_KEY", "").strip() or os.environ.get("GROQ_KEY", "").strip()
-        
-        if groq_key and not groq_key.startswith("AIzaSy"):
-            print(f"[{task_id}] Background: Transcribing audio with Groq (whisper-large-v3-turbo)...", flush=True)
-            TASKS[task_id]["progress"] = "⚡ جاري تفريغ الصوت بسرعة فائقة بـ Groq Whisper Turbo..."
-            transcription_text = transcribe_audio_full_groq(
-                audio_path=audio_path,
-                groq_api_key=groq_key,
-                task_dir=task_dir
-            )
-        else:
-            print(f"[{task_id}] Background: Transcribing audio with Gemini...", flush=True)
-            TASKS[task_id]["progress"] = "✨ جاري تفريغ الصوت وتقسيمه بالذكاء الاصطناعي..."
-            transcription_text = transcribe_audio_with_gemini(
-                audio_path=audio_path,
-                api_key=gemini_api_key,
-                task_id=task_id
-            )
+        print(f"[{task_id}] Background: Transcribing audio with Gemini...", flush=True)
+        TASKS[task_id]["progress"] = "✨ جاري تفريغ الصوت وتقسيمه بالذكاء الاصطناعي..."
+        transcription_text = transcribe_audio_with_gemini(
+            audio_path=audio_path,
+            api_key=gemini_api_key,
+            task_id=task_id
+        )
         
         # Success
         TASKS[task_id].update({
@@ -958,12 +685,10 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
             "error": str(e)
         })
 
-@app.post("/api/transcribe-groq")
 @app.post("/api/transcribe-gemini")
 async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTasks):
-    active_key = (req.groqApiKey and req.groqApiKey.strip()) or (req.geminiApiKey and req.geminiApiKey.strip()) or os.environ.get("GROQ_API_KEY", "").strip()
-    if not active_key or active_key.strip() in ["", "none", "null"]:
-        raise HTTPException(status_code=400, detail="برجاء إدخال Groq API Key (gsk_...)")
+    if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
+        raise HTTPException(status_code=400, detail="Gemini API key is missing or invalid.")
         
     task_id = str(uuid.uuid4())
     task_dir = os.path.join(PUBLIC_DIR, f"temp_{task_id}")
@@ -983,9 +708,8 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
         run_transcription_background, 
         task_id, 
         req.youtubeUrl, 
-        req.geminiApiKey or active_key, 
-        task_dir,
-        req.groqApiKey or active_key
+        req.geminiApiKey, 
+        task_dir
     )
     
     # Schedule cleanup in the background after 20 minutes to save disk space
@@ -1070,7 +794,7 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
     user_prompt = (
         f"قم بتحليل النص المفرغ التالي واستخرج أفضل {num_shorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
         "شروط استخراج كل مقطع:\n"
-        "1. يجب اختيار توقيت البداية (start_time) وتوقيت النهاية (end_time) بمطابقة صارمة ودقيقة 100% للتوقيتات الزمنية المصاحبة لسطر بداية الجملة وسطرة نهايتها في النص المفرغ [MM:SS -> MM:SS] بالنص تماماً دون أي زيادة أو إزاحة أو تخمين.\n"
+        "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق (مثال: 05:47 أو 12:30).\n"
         "2. مدة المقطع واكتمال الحكاية/القصة: تتراوح مدة المقاطع العادية بين 30 ثانية و 150 ثانية (دقيقتين ونصف). أما إذا كان المقطع يتضمن قصة أو موقفاً أو حكاية أو مقلباً (Story / Narrative): يمنع منعاً باتاً قطع القصة في منتصفها، ويجب استمرار المقطع حتى اكتمال الخاتمة وقفلة الموقف بالكامل، ويُسمح بالامتداد خصيصاً في حالات القصص والمواقف حتى 210 ثانية (3 دقائق ونصف كحد أقصى) لضمان اكتمال الحكاية ونهايتها السعيدة/المفاجئة دون بتر.\n"
         "3. يجب تحديد 'الخطاف' (Hook) وهو أول جملة نطقها المتحدث في أول 3 ثوانٍ بنفس المقطع تماماً.\n"
         "4. كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
@@ -1091,88 +815,14 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         "response_format": {"type": "json_object"}
     }
     
-    import json
-
     res = requests.post(url, headers=headers, json=payload, timeout=90)
     if res.status_code != 200:
         raise Exception(f"OpenRouter API error (status {res.status_code}): {res.text}")
     
     data = res.json()
     content = data['choices'][0]['message']['content']
-    
-    return clean_and_parse_json(content)
-
-def clean_and_parse_json(content: str) -> dict:
     import json
-    content = content.strip()
-    if content.startswith("```"):
-        lines = content.split("\n")
-        content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
-    content = content.strip()
-
-    # Tier 1: standard json.loads with strict=False (allows unescaped control chars like \n inside strings)
-    try:
-        return json.loads(content, strict=False)
-    except Exception:
-        pass
-
-    # Tier 2: Fix unescaped backslashes (e.g. \D, \s, \w, unescaped \) -> \\
-    sanitized = re.sub(r'\\(?![/"\\bfnrtu])', r'\\\\', content)
-    try:
-        return json.loads(sanitized, strict=False)
-    except Exception:
-        pass
-
-    # Tier 3: String-aware brace balancing for extra data or incomplete text
-    start_idx = sanitized.find('{')
-    if start_idx != -1:
-        depth = 0
-        in_string = False
-        escape = False
-        end_idx = -1
-        for i in range(start_idx, len(sanitized)):
-            ch = sanitized[i]
-            if escape:
-                escape = False
-                continue
-            if ch == '\\':
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if not in_string:
-                if ch == '{':
-                    depth += 1
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0:
-                        end_idx = i
-                        break
-        if end_idx != -1:
-            sub_json = sanitized[start_idx:end_idx+1]
-            sub_json = re.sub(r',\s*([\]}])', r'\1', sub_json)
-            try:
-                return json.loads(sub_json, strict=False)
-            except Exception:
-                pass
-
-    # Tier 4: Fallback Regex extraction of short objects
-    shorts = []
-    pattern = r'\{\s*"title"\s*:\s*"(.*?)"\s*,\s*"start_time"\s*:\s*"(.*?)"\s*,\s*"end_time"\s*:\s*"(.*?)"\s*,\s*"script"\s*:\s*"(.*?)"\s*(?:,\s*"hook"\s*:\s*"(.*?)")?\s*\}'
-    matches = re.findall(pattern, content, re.DOTALL)
-    for m in matches:
-        shorts.append({
-            "title": m[0].strip(),
-            "start_time": m[1].strip(),
-            "end_time": m[2].strip(),
-            "script": m[3].strip(),
-            "hook": m[4].strip() if len(m) > 4 and m[4] else ""
-        })
-    if shorts:
-        return {"shorts": shorts}
-
-    raise Exception(f"Failed to parse JSON response from LLM: {content[:200]}")
+    return json.loads(content)
 
 @app.post("/api/suggest-shorts")
 async def suggest_shorts(req: SuggestShortsRequest):
@@ -1199,12 +849,8 @@ async def suggest_shorts(req: SuggestShortsRequest):
             print(f"⚠️ OpenRouter failed: {or_err}. Falling back to direct Gemini API...", flush=True)
 
     if not shorts_list:
-        has_gemini = req.geminiApiKey and req.geminiApiKey.strip() not in ["", "none", "null"]
-        has_openrouter = openrouter_key and openrouter_key.strip()
-        if not has_gemini and not has_openrouter:
-            raise HTTPException(status_code=400, detail="يرجى إدخال مفتاح OpenRouter API أو Gemini API لاستخراج المقاطع.")
-        if not has_gemini:
-            raise HTTPException(status_code=400, detail="فشل OpenRouter في معالجة الطلب ولا يوجد مفتاح Gemini API احتياطي. يرجى التحقق من مفتاح OpenRouter API أو إضافة مفتاح Gemini API.")
+        if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
+            raise HTTPException(status_code=400, detail="Gemini / OpenRouter API key is missing or invalid.")
         try:
             genai.configure(api_key=req.geminiApiKey)
             model = genai.GenerativeModel(
@@ -1229,50 +875,22 @@ async def suggest_shorts(req: SuggestShortsRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-def clean_short_field(text: str) -> str:
-    if not text or not isinstance(text, str):
-        return ""
-    cleaned = text.strip()
-    cleaned = re.sub(r'^(?:\d{1,2}:\d{2}(?::\d{2})?\s*)?(?:الخطاف|النص|العنوان|القصة|السكريبت)\s*:\s*', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'^(?:الخطاف|النص|العنوان|القصة|السكريبت)\s*:\s*', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\[\s*\d{1,2}:\d{2}.*?\]\s*:?', '', cleaned).strip()
-    return cleaned
-
-def extract_clean_hook(raw_hook: str, script_text: str) -> str:
-    clean_raw = clean_short_field(raw_hook)
-    clean_script = clean_short_field(script_text)
-
-    if clean_raw:
-        words = clean_raw.split()
-        if 2 <= len(words) <= 15:
-            return " ".join(words)
-
-    clauses = re.split(r'[.!\?\n،,]', clean_script)
-    for clause in clauses:
-        c_words = clause.strip().split()
-        if len(c_words) >= 3:
-            return " ".join(c_words[:12])
-
-    words = clean_script.split()
-    if words:
-        return " ".join(words[:12])
-    return clean_raw[:80] if clean_raw else "مقدمة مشوقة"
-
     max_secs = get_max_transcription_seconds(req.transcription)
     for s in shorts_list:
-        s["start_time"] = normalize_time_str(s.get("start_time", "00:00"), max_secs)
-        s["end_time"] = normalize_time_str(s.get("end_time", "00:00"), max_secs)
-        s["title"] = clean_short_field(enforce_title_style(s.get("title", ""), req.titleStyle))
-        rebuilt, snapped_start, snapped_end = rebuild_script_for_short(
+        s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
+        s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+        s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
+        s["script"] = rebuild_script_for_short(
             transcription=req.transcription,
             start_time=s["start_time"],
             end_time=s["end_time"],
             fallback_script=s.get("script", "")
         )
-        s["start_time"] = snapped_start
-        s["end_time"] = snapped_end
-        s["script"] = clean_short_field(rebuilt)
-        s["hook"] = extract_clean_hook(s.get("hook", ""), s["script"])
+        script_text = s.get("script", "").strip()
+        if script_text:
+            first_clause = re.split(r'[.!\?\n]', script_text)[0].strip()
+            if first_clause:
+                s["hook"] = first_clause
 
     return {
         "status": "success",
@@ -1337,19 +955,22 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
 
         max_secs = get_max_transcription_seconds(req.transcription)
         for s in shorts_list:
-            s["start_time"] = normalize_time_str(s.get("start_time", "00:00"), max_secs)
-            s["end_time"] = normalize_time_str(s.get("end_time", "00:00"), max_secs)
-            s["title"] = clean_short_field(enforce_title_style(s.get("title", ""), req.titleStyle))
-            rebuilt, snapped_start, snapped_end = rebuild_script_for_short(
+            s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
+            s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+            s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
+
+            s["script"] = rebuild_script_for_short(
                 transcription=req.transcription,
                 start_time=s["start_time"],
                 end_time=s["end_time"],
                 fallback_script=s.get("script", "")
             )
-            s["start_time"] = snapped_start
-            s["end_time"] = snapped_end
-            s["script"] = clean_short_field(rebuilt)
-            s["hook"] = extract_clean_hook(s.get("hook", ""), s["script"])
+
+            script_text = s.get("script", "").strip()
+            if script_text:
+                first_clause = re.split(r'[.!\?\n]', script_text)[0].strip()
+                if first_clause:
+                    s["hook"] = first_clause
 
         TASKS[task_id] = {
             "status": "success",
@@ -1440,7 +1061,16 @@ def get_ffmpeg_headers(format_dict) -> str:
         
     return header_str
 
-
+def format_seconds_to_time_str(seconds: float) -> str:
+    """Format float seconds into HH:MM:SS.mmm format for precise clipping"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds % 1) * 1000))
+    if ms == 1000:
+        s += 1
+        ms = 0
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 @app.post("/api/cut")
 def cut_video(req: CutRequest):
@@ -1453,10 +1083,8 @@ def cut_video(req: CutRequest):
     except Exception as e:
         raise HTTPException(400, f"Invalid start_time or end_time: {str(e)}")
 
-    if start_sec > end_sec:
-        start_sec, end_sec = end_sec, start_sec
     if start_sec >= end_sec:
-        end_sec = start_sec + 30.0
+        raise HTTPException(400, "start_time must be less than end_time")
 
     # تمديد مدة التحميل والقطع بمقدار 0.75 ثانية من النهاية لعمل تأثير التلاشي عليها
     # وتقليص تأثير التلاشي في البداية ليكون خفيفاً جداً لكي لا يضيع أول الكلام
@@ -1550,9 +1178,6 @@ def cut_video(req: CutRequest):
     )
 
 
-
-
-
 def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
     if len(TASKS) > 200:
         keys_to_remove = list(TASKS.keys())[:50]
@@ -1565,10 +1190,8 @@ def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
         start_sec = parse_time_to_seconds(req.start_time)
         end_sec = parse_time_to_seconds(req.end_time)
         
-        if start_sec > end_sec:
-            start_sec, end_sec = end_sec, start_sec
         if start_sec >= end_sec:
-            end_sec = start_sec + 30.0
+            raise Exception("start_time must be less than end_time")
             
         end_extension = 0.75
         fade_in_duration = 0.2
