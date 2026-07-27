@@ -87,6 +87,8 @@ cleanup_old_temp_files()
 class DownloadRequest(BaseModel):
     youtubeUrl: str
     geminiApiKey: str | None = None
+    groqApiKey: str | None = None
+
 
 class ShortSuggestion(BaseModel):
     title: str = Field(description="عنوان جذاب ومثير للمقطع القصير")
@@ -617,6 +619,72 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
 
     return "\n".join(chunks_results).strip()
 
+    segment_time_sec = chunk_minutes * 60
+    
+    split_cmd = [
+        'ffmpeg', '-y',
+        '-i', audio_path,
+        '-f', 'segment',
+        '-segment_time', str(segment_time_sec),
+        '-c', 'copy',
+        chunk_pattern
+    ]
+    subprocess.run(split_cmd, capture_output=True)
+    
+    import glob
+    chunk_files = glob.glob(os.path.join(dir_name, "chunk_*.mp3"))
+    
+    def get_chunk_idx(filepath):
+        try:
+            return int(os.path.basename(filepath).split('_')[1].split('.')[0])
+        except:
+            return 9999
+            
+    chunk_files.sort(key=get_chunk_idx)
+    if not chunk_files:
+        chunk_files = [audio_path]
+
+    full_transcription_lines = []
+    total_chunks = len(chunk_files)
+
+    for idx, c_path in enumerate(chunk_files):
+        offset_seconds = idx * segment_time_sec
+        try:
+            print(f"[*] Transcribing chunk {idx+1}/{total_chunks} with Groq...", flush=True)
+            if task_id and task_id in TASKS:
+                TASKS[task_id]["progress"] = f"جاري تفريغ الجزء {idx+1}/{total_chunks} عبر Groq..."
+                
+            headers = {"Authorization": f"Bearer {groq_api_key.strip()}"}
+            with open(c_path, "rb") as file:
+                files = {"file": (os.path.basename(c_path), file, "audio/mpeg")}
+                data = {
+                    "model": "whisper-large-v3-turbo",
+                    "response_format": "verbose_json"
+                }
+                resp = requests.post("https://api.groq.com/openai/v1/audio/transcriptions", headers=headers, files=files, data=data, timeout=120)
+                resp.raise_for_status()
+                res_dict = resp.json()
+
+            segments = res_dict.get("segments", [])
+            for seg in segments:
+                s_start = float(seg.get("start", 0.0)) + offset_seconds
+                s_end = float(seg.get("end", 0.0)) + offset_seconds
+                text = seg.get("text", "").strip()
+
+                if text:
+                    h1, m1, s1 = int(s_start // 3600), int((s_start % 3600) // 60), int(s_start % 60)
+                    h2, m2, s2 = int(s_end // 3600), int((s_end % 3600) // 60), int(s_end % 60)
+
+                    t1 = f"{h1:02d}:{m1:02d}:{s1:02d}" if h1 > 0 else f"{m1:02d}:{s1:02d}"
+                    t2 = f"{h2:02d}:{m2:02d}:{s2:02d}" if h2 > 0 else f"{m2:02d}:{s2:02d}"
+
+                    full_transcription_lines.append(f"[{t1} -> {t2}] {text}")
+        except Exception as c_err:
+            print(f"⚠️ Groq chunk {idx+1} error: {c_err}", flush=True)
+
+    result_text = "\n".join(full_transcription_lines)
+    return result_text
+
 def clean_temp_dir(path: str):
     """Clean up the temporary directory after some delay or on request"""
     if os.path.exists(path):
@@ -643,8 +711,7 @@ def read_root():
         "files_in_dir": os.listdir(".")
     }
 
-def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key: str, task_dir: str):
-    # To prevent memory leak, keep TASKS size under control
+def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key: str, groq_api_key: str, task_dir: str):
     if len(TASKS) > 200:
         keys_to_remove = list(TASKS.keys())[:50]
         for k in keys_to_remove:
@@ -660,18 +727,27 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
             raise Exception("فشل تحميل ملف الصوت من السيرفر.")
             
-        print(f"[{task_id}] Background: Transcribing audio with Gemini...", flush=True)
-        TASKS[task_id]["progress"] = "✨ جاري تفريغ الصوت وتقسيمه بالذكاء الاصطناعي..."
-        transcription_text = transcribe_audio_with_gemini(
-            audio_path=audio_path,
-            api_key=gemini_api_key,
-            task_id=task_id
-        )
+        if groq_api_key and groq_api_key.strip():
+            print(f"[{task_id}] Background: Transcribing audio with Groq Whisper Large V3 Turbo...", flush=True)
+            TASKS[task_id]["progress"] = "⚡ جاري التفريغ السريع بـ Groq Whisper Large V3 Turbo..."
+            transcription_text = transcribe_audio_with_groq(
+                audio_path=audio_path,
+                groq_api_key=groq_api_key.strip(),
+                task_id=task_id
+            )
+        else:
+            print(f"[{task_id}] Background: Transcribing audio with Gemini...", flush=True)
+            TASKS[task_id]["progress"] = "✨ جاري تفريغ الصوت وتقسيمه بالذكاء الاصطناعي..."
+            transcription_text = transcribe_audio_with_gemini(
+                audio_path=audio_path,
+                api_key=gemini_api_key,
+                task_id=task_id
+            )
         
         # Success
         TASKS[task_id].update({
             "status": "success",
-            "progress": "اكتمل بنجاح! 🎉",
+            "progress": "اكتمل بنجاح!",
             "audioUrl": f"public/temp_{task_id}/audio.mp3",
             "transcription": transcription_text
         })
@@ -684,6 +760,43 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
             "progress": f"فشل: {str(e)}",
             "error": str(e)
         })
+
+@app.post("/api/transcribe-gemini")
+async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTasks):
+    has_groq = req.groqApiKey and req.groqApiKey.strip() not in ["", "none", "null"]
+    has_gemini = req.geminiApiKey and req.geminiApiKey.strip() not in ["", "none", "null"]
+    
+    if not has_groq and not has_gemini:
+        raise HTTPException(status_code=400, detail="يرجى إدخال مفتاح Groq API Key أو Gemini API Key لتفريغ الصوت.")
+        
+    task_id = str(uuid.uuid4())
+    task_dir = os.path.join(PUBLIC_DIR, f"temp_{task_id}")
+    os.makedirs(task_dir, exist_ok=True)
+    
+    TASKS[task_id] = {
+        "status": "processing",
+        "progress": "جاري بدء المهمة...",
+        "audioUrl": None,
+        "transcription": None,
+        "error": None
+    }
+    
+    background_tasks.add_task(
+        run_transcription_background, 
+        task_id, 
+        req.youtubeUrl, 
+        req.geminiApiKey,
+        req.groqApiKey,
+        task_dir
+    )
+    
+    background_tasks.add_task(schedule_dir_cleanup, task_dir, 1200)
+    
+    return {
+        "status": "queued",
+        "taskId": task_id
+    }
+
 
 @app.post("/api/transcribe-gemini")
 async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTasks):
