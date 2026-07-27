@@ -615,11 +615,21 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
         futures = [executor.submit(process_single_chunk, (idx, cp)) for idx, cp in enumerate(chunk_files)]
         for future in concurrent.futures.as_completed(futures):
             idx, text = future.result()
-            chunks_results[idx] = text
-
     return "\n".join(chunks_results).strip()
 
+def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes: int = 10, task_id: str = None) -> str:
+    """
+    Transcribes YouTube audio using Groq's whisper-large-v3-turbo API ultra-fast,
+    splitting audio into chunks if needed, and concatenates all timestamped segments.
+    """
+    print(f"⚡ Transcribing full YouTube audio with Groq whisper-large-v3-turbo...", flush=True)
+    if task_id and task_id in TASKS:
+        TASKS[task_id]["progress"] = "جاري التفريغ الفائق عبر Groq Whisper Large V3 Turbo..."
+
+    dir_name = os.path.dirname(audio_path)
+    chunk_pattern = os.path.join(dir_name, "chunk_%d.mp3")
     segment_time_sec = chunk_minutes * 60
+
     
     split_cmd = [
         'ffmpeg', '-y',
