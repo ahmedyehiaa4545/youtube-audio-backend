@@ -380,46 +380,17 @@ def build_word_map(segments: list[dict]) -> list[tuple[str, int]]:
 
 def locate_exact_words_in_transcript(segments: list[dict], script_text: str) -> tuple[float, float] | None:
     """
-    Calculates exact sub-segment timestamps for the starting and ending words
-    by interpolating word character positions inside each transcript segment duration.
-    This guarantees that if a sentence starts mid-segment, previous words in that segment are omitted!
+    Finds the full transcript sentence/segment where the script starts,
+    and snaps start_time to the exact start of that segment (segments[start_seg_idx]["start"]).
+    This guarantees that clips always start cleanly at the beginning of full sentences (e.g. 'إيش السلوك...', 'طيب...').
     """
-    all_words = []
-    for seg in segments:
-        seg_text = seg.get("text", "")
-        if not seg_text.strip():
-            continue
-        seg_start = seg["start"]
-        seg_end = seg["end"]
-        seg_dur = max(0.2, seg_end - seg_start)
-        total_len = len(seg_text)
-
-        matches = list(re.finditer(r'[^\s!؟.,،؛:?!()"\'-]+', seg_text))
-        if not matches:
-            continue
-        
-        for m in matches:
-            raw_w = m.group(0)
-            norm_w_list = normalize_words_for_matching(raw_w)
-            if not norm_w_list:
-                continue
-            norm_w = norm_w_list[0]
-            
-            # Sub-segment character position interpolation
-            w_start = seg_start + (m.start() / total_len) * seg_dur
-            w_end = seg_start + (m.end() / total_len) * seg_dur
-            all_words.append({
-                "word": norm_w,
-                "start": w_start,
-                "end": w_end
-            })
-
+    word_map = build_word_map(segments)
     script_words = normalize_words_for_matching(script_text)
-    if not all_words or len(script_words) < 2:
+    if not word_map or len(script_words) < 2:
         return None
 
-    t_words = [w["word"] for w in all_words]
-    sm = difflib.SequenceMatcher(None, script_words, t_words, autojunk=False)
+    transcript_words = [w for w, _ in word_map]
+    sm = difflib.SequenceMatcher(None, script_words, transcript_words, autojunk=False)
     blocks = [b for b in sm.get_matching_blocks() if b.size >= 2]
     if not blocks:
         return None
@@ -434,13 +405,17 @@ def locate_exact_words_in_transcript(segments: list[dict], script_text: str) -> 
     first = max(start_blocks, key=lambda b: b.size)
     last = max(end_blocks, key=lambda b: b.size)
 
-    start_idx = first.b
-    end_idx = last.b + last.size - 1
+    start_word_idx = first.b
+    end_word_idx = last.b + last.size - 1
 
-    if end_idx < start_idx:
+    if end_word_idx < start_word_idx:
         return None
 
-    return all_words[start_idx]["start"], all_words[end_idx]["end"]
+    start_seg_idx = word_map[start_word_idx][1]
+    end_seg_idx = word_map[end_word_idx][1]
+
+    # Return full segment start timestamp and full segment end timestamp
+    return segments[start_seg_idx]["start"], segments[end_seg_idx]["end"]
 
 
 def rebuild_script_for_short(transcription: str, start_time: str, end_time: str, fallback_script: str, start_pad: float = 0.0, end_pad: float = 0.25) -> tuple[str, str, str]:
@@ -1578,69 +1553,7 @@ def cut_video(req: CutRequest):
     )
 
 
-def verify_and_fine_tune_audio(video_path: str, target_text: str, groq_api_key: str) -> float:
-    """
-    Extracts 6 seconds of audio from video_path, sends to Groq Whisper for word-level timestamps in <0.3s,
-    and returns exact offset seconds where speech actually starts.
-    """
-    if not groq_api_key or not os.path.exists(video_path):
-        return 0.0
 
-    try:
-        task_dir = os.path.dirname(video_path)
-        sample_audio = os.path.join(task_dir, f"sample_head_{uuid.uuid4().hex[:6]}.mp3")
-
-        cmd = [
-            'ffmpeg', '-y',
-            '-i', video_path,
-            '-t', '6',
-            '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k',
-            sample_audio
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        if res.returncode != 0 or not os.path.exists(sample_audio):
-            return 0.0
-
-        url = "https://api.groq.com/openai/v1/audio/transcriptions"
-        headers = {"Authorization": f"Bearer {groq_api_key.strip()}"}
-        with open(sample_audio, "rb") as f:
-            files = {"file": (os.path.basename(sample_audio), f, "audio/mp3")}
-            data = {
-                "model": "whisper-large-v3-turbo",
-                "response_format": "verbose_json",
-                "timestamp_granularities[]": "word"
-            }
-            res_groq = requests.post(url, headers=headers, files=files, data=data, timeout=12)
-
-        try: os.remove(sample_audio)
-        except: pass
-
-        if res_groq.status_code != 200:
-            return 0.0
-
-        groq_json = res_groq.json()
-        words = groq_json.get("words", [])
-        if not words:
-            return 0.0
-
-        target_words = normalize_words_for_matching(target_text)[:5]
-        sample_words = [normalize_words_for_matching(w.get("word", "")) for w in words]
-
-        for i, w_norm_list in enumerate(sample_words):
-            if not w_norm_list:
-                continue
-            w_norm = w_norm_list[0]
-            if target_words and w_norm in target_words:
-                w_start = float(words[i].get("start", 0.0))
-                if 0.15 <= w_start <= 4.5:
-                    print(f"🎧 Groq Audio Fine-Tuner: Detected target word '{w_norm}' at offset {w_start:.3f}s", flush=True)
-                    return w_start
-                break
-
-    except Exception as err:
-        print(f"⚠️ Groq Audio Fine-Tuner warning: {err}", flush=True)
-
-    return 0.0
 
 
 def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
@@ -1697,34 +1610,17 @@ def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
             err_msg = result.stderr.strip() if result.stderr else "Output MP4 file was not generated by yt-dlp"
             raise Exception(f"Cutting failed: {err_msg}")
 
-        TASKS[task_id]["progress"] = "🎧 جاري التثبت والضبط السمعي الدقيق للتوقيت بـ Groq..."
-        groq_key = os.environ.get("GROQ_API_KEY", "")
-        offset = verify_and_fine_tune_audio(temp_raw_path, req.start_time, groq_key)
-
         TASKS[task_id]["progress"] = "✨ جاري تطبيق الفلاتر الصوتية والتلاشي..."
-        start_fade_out = max(1.0, original_duration_sec - offset)
-
-        if offset > 0.15:
-            ffmpeg_cmd = [
-                'ffmpeg', '-y',
-                '-ss', f"{offset:.3f}",
-                '-i', temp_raw_path,
-                '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
-                '-map', '0:v', '-map', '[a]',
-                '-c:v', 'copy',
-                '-c:a', 'aac', '-b:a', '192k',
-                output_path
-            ]
-        else:
-            ffmpeg_cmd = [
-                'ffmpeg', '-y',
-                '-i', temp_raw_path,
-                '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
-                '-map', '0:v', '-map', '[a]',
-                '-c:v', 'copy',
-                '-c:a', 'aac', '-b:a', '192k',
-                output_path
-            ]
+        start_fade_out = original_duration_sec
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-i', temp_raw_path,
+            '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
+            '-map', '0:v', '-map', '[a]',
+            '-c:v', 'copy',
+            '-c:a', 'aac', '-b:a', '192k',
+            output_path
+        ]
         
         filter_result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
         if filter_result.returncode != 0 or not os.path.exists(output_path):
