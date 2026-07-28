@@ -947,6 +947,18 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
     import json
     return json.loads(content)
 
+def extract_single_sentence_hook(script_text: str) -> str:
+    if not script_text:
+        return ""
+    # Split by Arabic punctuation: periods, exclamation, question marks, commas, semicolons, or newlines
+    clauses = [c.strip() for c in re.split(r'[.!\?\n،؛]', script_text) if c.strip()]
+    first_clause = clauses[0] if clauses else script_text
+    # If the first clause is still too long (more than 7 words), keep only the first 6 words to represent a quick 3-second hook
+    words = first_clause.split()
+    if len(words) > 7:
+        return " ".join(words[:6]) + "..."
+    return first_clause
+
 @app.post("/api/suggest-shorts")
 async def suggest_shorts(req: SuggestShortsRequest):
     if not req.transcription or req.transcription.strip() == "":
@@ -1009,11 +1021,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
             end_time=s["end_time"],
             fallback_script=s.get("script", "")
         )
-        script_text = s.get("script", "").strip()
-        if script_text:
-            first_clause = re.split(r'[.!\?\n]', script_text)[0].strip()
-            if first_clause:
-                s["hook"] = first_clause
+        s["hook"] = extract_single_sentence_hook(s.get("script", ""))
 
     return {
         "status": "success",
@@ -1089,11 +1097,7 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
                 fallback_script=s.get("script", "")
             )
 
-            script_text = s.get("script", "").strip()
-            if script_text:
-                first_clause = re.split(r'[.!\?\n]', script_text)[0].strip()
-                if first_clause:
-                    s["hook"] = first_clause
+            s["hook"] = extract_single_sentence_hook(s.get("script", ""))
 
         TASKS[task_id] = {
             "status": "success",
