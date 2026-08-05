@@ -969,6 +969,16 @@ def extract_single_sentence_hook(script_text: str) -> str:
         return " ".join(words[:6]) + "..."
     return first_clause
 
+def extract_two_sentence_summary(script_text: str) -> str:
+    if not script_text:
+        return ""
+    clauses = [c.strip() for c in re.split(r'[.!\?\n،؛]', script_text) if c.strip()]
+    if len(clauses) >= 2:
+        return f"{clauses[0]}.. {clauses[1]}."
+    elif len(clauses) == 1:
+        return f"{clauses[0]}."
+    return script_text[:120]
+
 @app.post("/api/suggest-shorts")
 async def suggest_shorts(req: SuggestShortsRequest):
     if not req.transcription or req.transcription.strip() == "":
@@ -1032,7 +1042,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
             fallback_script=s.get("script", "")
         )
         s["hook"] = extract_single_sentence_hook(s.get("script", ""))
-        s["sub_hook"] = s.get("sub_hook") or s.get("summary_hook") or ""
+        s["sub_hook"] = s.get("sub_hook") or s.get("summary_hook") or extract_two_sentence_summary(s.get("script", ""))
 
     return {
         "status": "success",
@@ -1109,7 +1119,7 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
             )
 
             s["hook"] = extract_single_sentence_hook(s.get("script", ""))
-            s["sub_hook"] = s.get("sub_hook") or s.get("summary_hook") or ""
+            s["sub_hook"] = s.get("sub_hook") or s.get("summary_hook") or extract_two_sentence_summary(s.get("script", ""))
 
         TASKS[task_id] = {
             "status": "success",
