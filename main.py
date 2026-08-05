@@ -898,7 +898,8 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         "{\n"
         '  "shorts": [\n'
         '    {\n'
-        '      "title": "عنوان المقطع",\n'
+        '      "title": "عنوان جذاب يشد المشاهد وله علاقة مباشرة بالفكرة الفعلية للمقطع",\n'
+        '      "sub_hook": "جملتان مختصرتان ملهمتان تشدان وتجذبان المشاهد بقوة لإكمال المقطع للنهاية وتلخصان الجوهر بطريقة مشوقة",\n'
         '      "start_time": "05:47",\n'
         '      "end_time": "06:20",\n'
         '      "script": "النص الكامل للمقطع القصير كما ورد في التفريغ",\n'
@@ -908,11 +909,20 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         "}\n"
     )
     
-    title_instruction = "5. صياغة عنوان جذاب ومثير للاهتمام لكل مقطع."
+    title_instruction = (
+        "5. صياغة عنوان جذاب ومثير يشد انتباه المشاهد بقوة، على أن يكون له علاقة سياقية ومباشرة بمحتوى المقطع الفعلي دون تهويل كاذب.\n"
+        "6. صياغة جملتين مختصرتين جذابتين (sub_hook) تُكتبان تحت العنوان لتلخيص فكرة المقطع بطريقة مشوقة تحفز وتجذب المشاهد لإكمال الفيديو للنهاية."
+    )
     if title_style == "short":
-        title_instruction = "5. صياغة عنوان قصير ومختصر جداً يتكون من 2 إلى 4 كلمات فقط (حد أقصى 5 كلمات كحد أقصى مطلق!). يمنع منعاً باتاً كتابة عناوين طويلة أو تفصيلية."
+        title_instruction = (
+            "5. صياغة عنوان قصير ومختصر جداً يتكون من 2 إلى 4 كلمات فقط (حد أقصى 5 كلمات كحد أقصى مطلق!) يشد المشاهد وله علاقة بالمقطع. يمنع منعاً باتاً كتابة عناوين طويلة.\n"
+            "6. صياغة جملتين مختصرتين جذابتين (sub_hook) تُكتبان تحت العنوان لتلخيص فكرة المقطع بطريقة مشوقة تجذب المشاهد لإكمال الفيديو."
+        )
     elif title_style == "medium":
-        title_instruction = "5. صياغة عنوان متوسط ومفصل من 5 إلى 9 كلمات يوضح فكرة المقطع بوضوح وجاذبية."
+        title_instruction = (
+            "5. صياغة عنوان متوسط ومفصل من 5 إلى 9 كلمات يوضح فكرة المقطع بوضوح وجاذبية وله علاقة مباشرة بالموضوع.\n"
+            "6. صياغة جملتين مختصرتين جذابتين (sub_hook) تُكتبان تحت العنوان لتلخيص فكرة المقطع بطريقة مشوقة تجذب المشاهد لإكمال الفيديو."
+        )
 
     user_prompt = (
         f"قم بتحليل النص المفرغ التالي واستخرج أفضل {num_shorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
@@ -1022,6 +1032,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
             fallback_script=s.get("script", "")
         )
         s["hook"] = extract_single_sentence_hook(s.get("script", ""))
+        s["sub_hook"] = s.get("sub_hook") or s.get("summary_hook") or ""
 
     return {
         "status": "success",
@@ -1098,6 +1109,7 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
             )
 
             s["hook"] = extract_single_sentence_hook(s.get("script", ""))
+            s["sub_hook"] = s.get("sub_hook") or s.get("summary_hook") or ""
 
         TASKS[task_id] = {
             "status": "success",
