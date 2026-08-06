@@ -615,7 +615,12 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
         futures = [executor.submit(process_single_chunk, (idx, cp)) for idx, cp in enumerate(chunk_files)]
         for future in concurrent.futures.as_completed(futures):
             idx, text = future.result()
-    return "\n".join(chunks_results).strip()
+            chunks_results[idx] = text
+            
+    final_text = "\n".join(chunks_results).strip()
+    if not final_text:
+        raise Exception("فشلت عملية التفريغ (لم يتم استخراج أي نص).")
+    return final_text
 
 def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes: int = 10, task_id: str = None) -> str:
     """
@@ -692,7 +697,9 @@ def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes
         except Exception as c_err:
             print(f"⚠️ Groq chunk {idx+1} error: {c_err}", flush=True)
 
-    result_text = "\n".join(full_transcription_lines)
+    result_text = "\n".join(full_transcription_lines).strip()
+    if not result_text:
+        raise Exception("فشلت عملية التفريغ بـ Groq (قد يكون المفتاح غير صالح أو انتهت الحصة).")
     return result_text
 
 def clean_temp_dir(path: str):
