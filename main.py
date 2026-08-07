@@ -414,7 +414,7 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
         if task_id and task_id in TASKS:
             TASKS[task_id]["progress"] = msg
 
-    update_task("⚡ جاري استخراج وتنزيل الصوت مباشرة بـ yt-dlp...")
+    update_task("⚡ جاري معالجة واستخراج الصوت عالي الجودة...")
     print(f"⚡ Attempting fast direct audio extraction via yt-dlp for {youtube_url}...", flush=True)
 
     try:
