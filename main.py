@@ -92,6 +92,7 @@ class DownloadRequest(BaseModel):
 
 class ShortSuggestion(BaseModel):
     title: str = Field(description="عنوان جذاب ومثير للمقطع القصير")
+    sub_hook: List[str] = Field(description="مصفوفة تحتوي على جملتين مشوقتين حصراً، كل منهما لا تتجاوز 5 كلمات وتكتبان تحت العنوان لتلخيص فكرة المقطع")
     start_time: str = Field(description="توقيت بداية المقطع كما ورد في النص المفرغ تماماً (مثال: 05:47)")
     end_time: str = Field(description="توقيت نهاية المقطع كما ورد في النص المفرغ تماماً (مثال: 06:02)")
     script: str = Field(description="النص الكامل للمقطع القصير كما ورد في التفريغ")
@@ -104,7 +105,7 @@ class SuggestShortsRequest(BaseModel):
     transcription: str
     geminiApiKey: str | None = None
     openrouterApiKey: str | None = None
-    openrouterModel: str | None = "google/gemini-3.1-flash-lite"
+    openrouterModel: str | None = "google/gemini-2.5-pro-preview-05-06"
     customPrompt: str | None = None
     titleStyle: str | None = "auto"
     numShorts: int = 3
@@ -891,7 +892,7 @@ def enforce_title_style(title: str, style: str) -> str:
                 
     return clean_title
 
-def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, model_name: str = "google/gemini-3.1-flash-lite", custom_prompt: str = None, title_style: str = "auto"):
+def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, model_name: str = "google/gemini-2.5-pro-preview-05-06", custom_prompt: str = None, title_style: str = "auto"):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -906,7 +907,10 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         '  "shorts": [\n'
         '    {\n'
         '      "title": "عنوان جذاب يشد المشاهد وله علاقة مباشرة بالفكرة الفعلية للمقطع",\n'
-        '      "sub_hook": "جملتان مختصرتان ملهمتان تشدان وتجذبان المشاهد بقوة لإكمال المقطع للنهاية وتلخصان الجوهر بطريقة مشوقة",\n'
+        '      "sub_hook": [\n'
+        '        "الجملة الأولى المشوقة (من 2 إلى 5 كلمات)",\n'
+        '        "الجملة الثانية الجذابة (من 2 إلى 5 كلمات)"\n'
+        '      ],\n'
         '      "start_time": "05:47",\n'
         '      "end_time": "06:20",\n'
         '      "script": "النص الكامل للمقطع القصير كما ورد في التفريغ",\n'
@@ -992,7 +996,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
         raise HTTPException(status_code=400, detail="Transcription content is empty.")
     
     openrouter_key = req.openrouterApiKey or os.environ.get("OPENROUTER_API_KEY")
-    openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-3.1-flash-lite"
+    openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-2.5-pro-preview-05-06"
     shorts_list = []
 
     if openrouter_key and openrouter_key.strip():
@@ -1067,7 +1071,7 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
         TASKS[task_id] = {"status": "processing", "progress": f"✨ جاري تحليل النص بالذكاء الاصطناعي واقتراح {req.numShorts} مقاطع Shorts..."}
 
         openrouter_key = req.openrouterApiKey or os.environ.get("OPENROUTER_API_KEY")
-        openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-3.1-flash-lite"
+        openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-2.5-pro-preview-05-06"
         shorts_list = []
 
         if openrouter_key and openrouter_key.strip():
