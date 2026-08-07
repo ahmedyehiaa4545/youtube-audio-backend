@@ -520,7 +520,7 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
     except Exception as e:
         print(f"⚠️ Direct yt-dlp extraction error ({e}). Falling back to RapidAPI...", flush=True)
 
-    update_task("🌐 جارٍ استخراج الصوت عبر خادم التنزيل السريع (RapidAPI)...")
+    update_task("⚡ جاري المعالجة واستكمال التحميل السريع...")
     return download_audio_via_rapidapi(youtube_url, output_path, task_id)
 
 # دالة لضبط التوقيتات برمجياً (رياضياً)
@@ -676,9 +676,9 @@ def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes
     Transcribes YouTube audio using Groq's whisper-large-v3-turbo API ultra-fast,
     splitting audio into chunks if needed, and concatenates all timestamped segments.
     """
-    print(f"⚡ Transcribing full YouTube audio with Groq whisper-large-v3-turbo...", flush=True)
+    print(f"⚡ Transcribing full YouTube audio...", flush=True)
     if task_id and task_id in TASKS:
-        TASKS[task_id]["progress"] = "جاري التفريغ الفائق عبر Groq Whisper Large V3 Turbo..."
+        TASKS[task_id]["progress"] = "جاري معالجة وتفريغ الصوت عالي الدقة..."
 
     dir_name = os.path.dirname(audio_path)
     chunk_pattern = os.path.join(dir_name, "chunk_%d.mp3")
@@ -714,9 +714,9 @@ def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes
     for idx, c_path in enumerate(chunk_files):
         offset_seconds = idx * segment_time_sec
         try:
-            print(f"[*] Transcribing chunk {idx+1}/{total_chunks} with Groq...", flush=True)
+            print(f"[*] Transcribing chunk {idx+1}/{total_chunks}...", flush=True)
             if task_id and task_id in TASKS:
-                TASKS[task_id]["progress"] = f"جاري تفريغ الجزء {idx+1}/{total_chunks} عبر Groq..."
+                TASKS[task_id]["progress"] = f"جاري تفريغ الصوت وتحليله... ({idx+1}/{total_chunks})"
                 
             headers = {"Authorization": f"Bearer {groq_api_key.strip()}"}
             with open(c_path, "rb") as file:
