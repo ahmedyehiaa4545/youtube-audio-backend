@@ -40,8 +40,41 @@ app.mount("/public", StaticFiles(directory=PUBLIC_DIR), name="public")
 
 COOKIE_FILE_PATH = "/tmp/cookies.txt"
 DB_PATH = os.path.abspath("analytics.db")
+ADMIN_KEYS_FILE = os.path.abspath("admin_keys.json")
+GLOBAL_SYSTEM_KEYS = {}
+
+def load_system_keys():
+    global GLOBAL_SYSTEM_KEYS
+    import json
+    if os.path.exists(ADMIN_KEYS_FILE):
+        try:
+            with open(ADMIN_KEYS_FILE, "r", encoding="utf-8") as f:
+                GLOBAL_SYSTEM_KEYS = json.load(f)
+                print("🔑 Loaded system keys from admin_keys.json in backend:", list(GLOBAL_SYSTEM_KEYS.keys()), flush=True)
+        except Exception as e:
+            print(f"⚠️ Error loading admin_keys.json: {e}", flush=True)
+
+    env_map = {
+        "groq": os.environ.get("GROQ_API_KEY", "").strip(),
+        "elevenlabs": os.environ.get("ELEVENLABS_API_KEY", "").strip(),
+        "openrouter": os.environ.get("OPENROUTER_CORRECTOR_KEY", "").strip() or os.environ.get("OPENROUTER_API_KEY", "").strip(),
+        "gemini": os.environ.get("GEMINI_API_KEY", "").strip()
+    }
+    for k, v in env_map.items():
+        if v and not GLOBAL_SYSTEM_KEYS.get(k):
+            GLOBAL_SYSTEM_KEYS[k] = v
+
+    try:
+        with open(ADMIN_KEYS_FILE, "w", encoding="utf-8") as f:
+            json.dump(GLOBAL_SYSTEM_KEYS, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+load_system_keys()
 
 def get_system_key(key_name: str) -> str:
+    if GLOBAL_SYSTEM_KEYS.get(key_name):
+        return GLOBAL_SYSTEM_KEYS[key_name].strip()
     try:
         import sqlite3
         conn = sqlite3.connect(DB_PATH)
@@ -50,10 +83,11 @@ def get_system_key(key_name: str) -> str:
         row = cursor.fetchone()
         conn.close()
         if row and row[0]:
+            GLOBAL_SYSTEM_KEYS[key_name] = row[0].strip()
             return row[0].strip()
     except Exception:
         pass
-    return ""
+    return os.environ.get(f"{key_name.upper()}_API_KEY", "").strip()
 
 def init_cookies():
     """Write cookies from env variable or copy local cookies.txt to /tmp"""
@@ -1675,5 +1709,73 @@ async def convert_vertical_async(
     background_tasks.add_task(run_convert_vertical_background, task_id, video_path, youtubeUrl, task_dir)
 
     return {"status": "processing", "taskId": task_id}
+
+
+class SystemKeysRequest(BaseModel):
+    token: str
+    groq_api_key: str = ""
+    elevenlabs_api_key: str = ""
+    openrouter_api_key: str = ""
+    gemini_api_key: str = ""
+
+@app.post("/api/admin/save-system-keys")
+def save_system_keys(req: SystemKeysRequest):
+    global GLOBAL_SYSTEM_KEYS
+    if req.token != "admin-session-token-12345":
+        raise HTTPException(status_code=401, detail="غير مصرح بالدخول")
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS system_keys (
+                key_name TEXT PRIMARY KEY,
+                key_value TEXT
+            )
+        """)
+        keys_map = {
+            "groq": req.groq_api_key.strip(),
+            "elevenlabs": req.elevenlabs_api_key.strip(),
+            "openrouter": req.openrouter_api_key.strip(),
+            "gemini": req.gemini_api_key.strip(),
+        }
+        for k, v in keys_map.items():
+            if v:
+                GLOBAL_SYSTEM_KEYS[k] = v
+                cursor.execute("INSERT OR REPLACE INTO system_keys (key_name, key_value) VALUES (?, ?)", (k, v))
+        conn.commit()
+        conn.close()
+
+        try:
+            import json
+            with open(ADMIN_KEYS_FILE, "w", encoding="utf-8") as f:
+                json.dump(GLOBAL_SYSTEM_KEYS, f, ensure_ascii=False, indent=2)
+            print("🔑 Saved system keys to admin_keys.json in backend successfully.", flush=True)
+        except Exception as e_file:
+            print(f"⚠️ Warning writing admin_keys.json in backend: {e_file}", flush=True)
+
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/get-system-keys")
+def get_system_keys_api(token: str = None):
+    if token != "admin-session-token-12345":
+        raise HTTPException(status_code=401, detail="غير مصرح بالدخول")
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS system_keys (key_name TEXT PRIMARY KEY, key_value TEXT)")
+        cursor.execute("SELECT key_name, key_value FROM system_keys")
+        rows = cursor.fetchall()
+        conn.close()
+        res_dict = {r[0]: r[1] for r in rows}
+        for k, v in GLOBAL_SYSTEM_KEYS.items():
+            if v and not res_dict.get(k):
+                res_dict[k] = v
+        return res_dict
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
