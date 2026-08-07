@@ -39,6 +39,21 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 app.mount("/public", StaticFiles(directory=PUBLIC_DIR), name="public")
 
 COOKIE_FILE_PATH = "/tmp/cookies.txt"
+DB_PATH = os.path.abspath("analytics.db")
+
+def get_system_key(key_name: str) -> str:
+    try:
+        import sqlite3
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT key_value FROM system_keys WHERE key_name = ?", (key_name,))
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0].strip()
+    except Exception:
+        pass
+    return ""
 
 def init_cookies():
     """Write cookies from env variable or copy local cookies.txt to /tmp"""
@@ -780,11 +795,11 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
 
 @app.post("/api/transcribe-gemini")
 async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTasks):
-    has_groq = req.groqApiKey and req.groqApiKey.strip() not in ["", "none", "null"]
-    has_gemini = req.geminiApiKey and req.geminiApiKey.strip() not in ["", "none", "null"]
+    effective_groq = (req.groqApiKey or "").strip() if (req.groqApiKey and req.groqApiKey.strip() not in ["", "none", "null"]) else (get_system_key("groq") or os.environ.get("GROQ_API_KEY", "").strip())
+    effective_gemini = (req.geminiApiKey or "").strip() if (req.geminiApiKey and req.geminiApiKey.strip() not in ["", "none", "null"]) else (get_system_key("gemini") or os.environ.get("GEMINI_API_KEY", "").strip())
     
-    if not has_groq and not has_gemini:
-        raise HTTPException(status_code=400, detail="يرجى إدخال مفتاح Groq API Key أو Gemini API Key لتفريغ الصوت.")
+    if not effective_groq and not effective_gemini:
+        raise HTTPException(status_code=400, detail="تعذر البدء: لم يتم ضبط مفاتيح محرك المعالجة ببيانات النظام. يرجى حفظ المفاتيح من لوحة مدير الموقع.")
         
     task_id = str(uuid.uuid4())
     task_dir = os.path.join(PUBLIC_DIR, f"temp_{task_id}")
@@ -802,8 +817,8 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
         run_transcription_background, 
         task_id, 
         req.youtubeUrl, 
-        req.geminiApiKey,
-        req.groqApiKey,
+        effective_gemini,
+        effective_groq,
         task_dir
     )
     
@@ -987,11 +1002,12 @@ async def suggest_shorts(req: SuggestShortsRequest):
     if not req.transcription or req.transcription.strip() == "":
         raise HTTPException(status_code=400, detail="Transcription content is empty.")
     
-    openrouter_key = req.openrouterApiKey or os.environ.get("OPENROUTER_API_KEY")
+    openrouter_key = (req.openrouterApiKey or "").strip() or get_system_key("openrouter") or os.environ.get("OPENROUTER_API_KEY", "").strip()
+    effective_gemini = (req.geminiApiKey or "").strip() or get_system_key("gemini") or os.environ.get("GEMINI_API_KEY", "").strip()
     openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-2.5-pro-preview-05-06"
     shorts_list = []
 
-    if openrouter_key and openrouter_key.strip():
+    if openrouter_key:
         print(f"🌐 Using OpenRouter ({openrouter_model}) for suggest_shorts...", flush=True)
         try:
             shorts_data = call_openrouter_shorts(
@@ -1007,10 +1023,10 @@ async def suggest_shorts(req: SuggestShortsRequest):
             print(f"⚠️ OpenRouter failed: {or_err}. Falling back to direct Gemini API...", flush=True)
 
     if not shorts_list:
-        if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
-            raise HTTPException(status_code=400, detail="Gemini / OpenRouter API key is missing or invalid.")
+        if not effective_gemini:
+            raise HTTPException(status_code=400, detail="تعذر معالجة النص: لم يتم ضبط مفاتيح محرك الذكاء الاصطناعي في لوحة المدير.")
         try:
-            genai.configure(api_key=req.geminiApiKey)
+            genai.configure(api_key=effective_gemini)
             model = genai.GenerativeModel(
                 model_name="gemini-3-flash-preview",
                 generation_config={
