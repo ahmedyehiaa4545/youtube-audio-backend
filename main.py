@@ -92,7 +92,6 @@ class DownloadRequest(BaseModel):
 
 class ShortSuggestion(BaseModel):
     title: str = Field(description="عنوان جذاب ومثير للمقطع القصير")
-    sub_hook: List[str] = Field(description="مصفوفة تحتوي على جملتين مشوقتين حصراً، كل منهما لا تتجاوز 5 كلمات وتكتبان تحت العنوان لتلخيص فكرة المقطع")
     start_time: str = Field(description="توقيت بداية المقطع كما ورد في النص المفرغ تماماً (مثال: 05:47)")
     end_time: str = Field(description="توقيت نهاية المقطع كما ورد في النص المفرغ تماماً (مثال: 06:02)")
     script: str = Field(description="النص الكامل للمقطع القصير كما ورد في التفريغ")
@@ -907,10 +906,6 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         '  "shorts": [\n'
         '    {\n'
         '      "title": "عنوان جذاب يشد المشاهد وله علاقة مباشرة بالفكرة الفعلية للمقطع",\n'
-        '      "sub_hook": [\n'
-        '        "الجملة الأولى المشوقة (من 2 إلى 5 كلمات)",\n'
-        '        "الجملة الثانية الجذابة (من 2 إلى 5 كلمات)"\n'
-        '      ],\n'
         '      "start_time": "05:47",\n'
         '      "end_time": "06:20",\n'
         '      "script": "النص الكامل للمقطع القصير كما ورد في التفريغ",\n'
@@ -921,18 +916,15 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
     )
     
     title_instruction = (
-        "5. صياغة عنوان جذاب ومثير يشد انتباه المشاهد بقوة، على أن يكون له علاقة سياقية ومباشرة بمحتوى المقطع الفعلي دون تهويل كاذب.\n"
-        "6. صياغة جملتين مختصرتين جذابتين (sub_hook) تُكتبان تحت العنوان لتلخيص فكرة المقطع بطريقة مشوقة تحفز وتجذب المشاهد لإكمال الفيديو للنهاية."
+        "5. صياغة عنوان جذاب ومثير يشد انتباه المشاهد بقوة، على أن يكون له علاقة سياقية ومباشرة بمحتوى المقطع الفعلي دون تهويل كاذب."
     )
     if title_style == "short":
         title_instruction = (
-            "5. صياغة عنوان قصير ومختصر جداً يتكون من 2 إلى 4 كلمات فقط (حد أقصى 5 كلمات كحد أقصى مطلق!) يشد المشاهد وله علاقة بالمقطع. يمنع منعاً باتاً كتابة عناوين طويلة.\n"
-            "6. صياغة جملتين مختصرتين جذابتين (sub_hook) تُكتبان تحت العنوان لتلخيص فكرة المقطع بطريقة مشوقة تجذب المشاهد لإكمال الفيديو."
+            "5. صياغة عنوان قصير ومختصر جداً يتكون من 2 إلى 4 كلمات فقط (حد أقصى 5 كلمات كحد أقصى مطلق!) يشد المشاهد وله علاقة بالمقطع. يمنع منعاً باتاً كتابة عناوين طويلة."
         )
     elif title_style == "medium":
         title_instruction = (
-            "5. صياغة عنوان متوسط ومفصل من 5 إلى 9 كلمات يوضح فكرة المقطع بوضوح وجاذبية وله علاقة مباشرة بالموضوع.\n"
-            "6. صياغة جملتين مختصرتين جذابتين (sub_hook) تُكتبان تحت العنوان لتلخيص فكرة المقطع بطريقة مشوقة تجذب المشاهد لإكمال الفيديو."
+            "5. صياغة عنوان متوسط ومفصل من 5 إلى 9 كلمات يوضح فكرة المقطع بوضوح وجاذبية وله علاقة مباشرة بالموضوع."
         )
 
     user_prompt = (
@@ -1053,7 +1045,6 @@ async def suggest_shorts(req: SuggestShortsRequest):
             fallback_script=s.get("script", "")
         )
         s["hook"] = extract_single_sentence_hook(s.get("script", ""))
-        s["sub_hook"] = s.get("sub_hook") or s.get("summary_hook") or extract_two_sentence_summary(s.get("script", ""))
 
     return {
         "status": "success",
@@ -1130,7 +1121,6 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
             )
 
             s["hook"] = extract_single_sentence_hook(s.get("script", ""))
-            s["sub_hook"] = s.get("sub_hook") or s.get("summary_hook") or extract_two_sentence_summary(s.get("script", ""))
 
         TASKS[task_id] = {
             "status": "success",
