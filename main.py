@@ -39,55 +39,6 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 app.mount("/public", StaticFiles(directory=PUBLIC_DIR), name="public")
 
 COOKIE_FILE_PATH = "/tmp/cookies.txt"
-DB_PATH = os.path.abspath("analytics.db")
-ADMIN_KEYS_FILE = os.path.abspath("admin_keys.json")
-GLOBAL_SYSTEM_KEYS = {}
-
-def load_system_keys():
-    global GLOBAL_SYSTEM_KEYS
-    import json
-    if os.path.exists(ADMIN_KEYS_FILE):
-        try:
-            with open(ADMIN_KEYS_FILE, "r", encoding="utf-8") as f:
-                GLOBAL_SYSTEM_KEYS = json.load(f)
-                print("🔑 Loaded system keys from admin_keys.json in backend:", list(GLOBAL_SYSTEM_KEYS.keys()), flush=True)
-        except Exception as e:
-            print(f"⚠️ Error loading admin_keys.json: {e}", flush=True)
-
-    env_map = {
-        "groq": os.environ.get("GROQ_API_KEY", "").strip(),
-        "elevenlabs": os.environ.get("ELEVENLABS_API_KEY", "").strip(),
-        "openrouter": os.environ.get("OPENROUTER_CORRECTOR_KEY", "").strip() or os.environ.get("OPENROUTER_API_KEY", "").strip(),
-        "gemini": os.environ.get("GEMINI_API_KEY", "").strip()
-    }
-    for k, v in env_map.items():
-        if v and not GLOBAL_SYSTEM_KEYS.get(k):
-            GLOBAL_SYSTEM_KEYS[k] = v
-
-    try:
-        with open(ADMIN_KEYS_FILE, "w", encoding="utf-8") as f:
-            json.dump(GLOBAL_SYSTEM_KEYS, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-load_system_keys()
-
-def get_system_key(key_name: str) -> str:
-    if GLOBAL_SYSTEM_KEYS.get(key_name):
-        return GLOBAL_SYSTEM_KEYS[key_name].strip()
-    try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT key_value FROM system_keys WHERE key_name = ?", (key_name,))
-        row = cursor.fetchone()
-        conn.close()
-        if row and row[0]:
-            GLOBAL_SYSTEM_KEYS[key_name] = row[0].strip()
-            return row[0].strip()
-    except Exception:
-        pass
-    return os.environ.get(f"{key_name.upper()}_API_KEY", "").strip()
 
 def init_cookies():
     """Write cookies from env variable or copy local cookies.txt to /tmp"""
@@ -463,7 +414,7 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
         if task_id and task_id in TASKS:
             TASKS[task_id]["progress"] = msg
 
-    update_task("⚡ جاري معالجة واستخراج الصوت عالي الجودة...")
+    update_task("⚡ جاري استخراج وتنزيل الصوت مباشرة بـ yt-dlp...")
     print(f"⚡ Attempting fast direct audio extraction via yt-dlp for {youtube_url}...", flush=True)
 
     try:
@@ -520,7 +471,7 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
     except Exception as e:
         print(f"⚠️ Direct yt-dlp extraction error ({e}). Falling back to RapidAPI...", flush=True)
 
-    update_task("⚡ جاري المعالجة واستكمال التحميل السريع...")
+    update_task("🌐 جارٍ استخراج الصوت عبر خادم التنزيل السريع (RapidAPI)...")
     return download_audio_via_rapidapi(youtube_url, output_path, task_id)
 
 # دالة لضبط التوقيتات برمجياً (رياضياً)
@@ -676,9 +627,9 @@ def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes
     Transcribes YouTube audio using Groq's whisper-large-v3-turbo API ultra-fast,
     splitting audio into chunks if needed, and concatenates all timestamped segments.
     """
-    print(f"⚡ Transcribing full YouTube audio...", flush=True)
+    print(f"⚡ Transcribing full YouTube audio with Groq whisper-large-v3-turbo...", flush=True)
     if task_id and task_id in TASKS:
-        TASKS[task_id]["progress"] = "جاري معالجة وتفريغ الصوت عالي الدقة..."
+        TASKS[task_id]["progress"] = "جاري التفريغ الفائق عبر Groq Whisper Large V3 Turbo..."
 
     dir_name = os.path.dirname(audio_path)
     chunk_pattern = os.path.join(dir_name, "chunk_%d.mp3")
@@ -714,9 +665,9 @@ def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes
     for idx, c_path in enumerate(chunk_files):
         offset_seconds = idx * segment_time_sec
         try:
-            print(f"[*] Transcribing chunk {idx+1}/{total_chunks}...", flush=True)
+            print(f"[*] Transcribing chunk {idx+1}/{total_chunks} with Groq...", flush=True)
             if task_id and task_id in TASKS:
-                TASKS[task_id]["progress"] = f"جاري تفريغ الصوت وتحليله... ({idx+1}/{total_chunks})"
+                TASKS[task_id]["progress"] = f"جاري تفريغ الجزء {idx+1}/{total_chunks} عبر Groq..."
                 
             headers = {"Authorization": f"Bearer {groq_api_key.strip()}"}
             with open(c_path, "rb") as file:
@@ -829,11 +780,11 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
 
 @app.post("/api/transcribe-gemini")
 async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTasks):
-    effective_groq = (req.groqApiKey or "").strip() if (req.groqApiKey and req.groqApiKey.strip() not in ["", "none", "null"]) else (get_system_key("groq") or os.environ.get("GROQ_API_KEY", "").strip())
-    effective_gemini = (req.geminiApiKey or "").strip() if (req.geminiApiKey and req.geminiApiKey.strip() not in ["", "none", "null"]) else (get_system_key("gemini") or os.environ.get("GEMINI_API_KEY", "").strip())
+    has_groq = req.groqApiKey and req.groqApiKey.strip() not in ["", "none", "null"]
+    has_gemini = req.geminiApiKey and req.geminiApiKey.strip() not in ["", "none", "null"]
     
-    if not effective_groq and not effective_gemini:
-        raise HTTPException(status_code=400, detail="تعذر البدء: لم يتم ضبط مفاتيح محرك المعالجة ببيانات النظام. يرجى حفظ المفاتيح من لوحة مدير الموقع.")
+    if not has_groq and not has_gemini:
+        raise HTTPException(status_code=400, detail="يرجى إدخال مفتاح Groq API Key أو Gemini API Key لتفريغ الصوت.")
         
     task_id = str(uuid.uuid4())
     task_dir = os.path.join(PUBLIC_DIR, f"temp_{task_id}")
@@ -851,8 +802,8 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
         run_transcription_background, 
         task_id, 
         req.youtubeUrl, 
-        effective_gemini,
-        effective_groq,
+        req.geminiApiKey,
+        req.groqApiKey,
         task_dir
     )
     
@@ -1036,12 +987,11 @@ async def suggest_shorts(req: SuggestShortsRequest):
     if not req.transcription or req.transcription.strip() == "":
         raise HTTPException(status_code=400, detail="Transcription content is empty.")
     
-    openrouter_key = (req.openrouterApiKey or "").strip() or get_system_key("openrouter") or os.environ.get("OPENROUTER_API_KEY", "").strip()
-    effective_gemini = (req.geminiApiKey or "").strip() or get_system_key("gemini") or os.environ.get("GEMINI_API_KEY", "").strip()
+    openrouter_key = req.openrouterApiKey or os.environ.get("OPENROUTER_API_KEY")
     openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-2.5-pro-preview-05-06"
     shorts_list = []
 
-    if openrouter_key:
+    if openrouter_key and openrouter_key.strip():
         print(f"🌐 Using OpenRouter ({openrouter_model}) for suggest_shorts...", flush=True)
         try:
             shorts_data = call_openrouter_shorts(
@@ -1057,10 +1007,10 @@ async def suggest_shorts(req: SuggestShortsRequest):
             print(f"⚠️ OpenRouter failed: {or_err}. Falling back to direct Gemini API...", flush=True)
 
     if not shorts_list:
-        if not effective_gemini:
-            raise HTTPException(status_code=400, detail="تعذر معالجة النص: لم يتم ضبط مفاتيح محرك الذكاء الاصطناعي في لوحة المدير.")
+        if not req.geminiApiKey or req.geminiApiKey.strip() in ["", "none", "null"]:
+            raise HTTPException(status_code=400, detail="Gemini / OpenRouter API key is missing or invalid.")
         try:
-            genai.configure(api_key=effective_gemini)
+            genai.configure(api_key=req.geminiApiKey)
             model = genai.GenerativeModel(
                 model_name="gemini-3-flash-preview",
                 generation_config={
@@ -1709,73 +1659,5 @@ async def convert_vertical_async(
     background_tasks.add_task(run_convert_vertical_background, task_id, video_path, youtubeUrl, task_dir)
 
     return {"status": "processing", "taskId": task_id}
-
-
-class SystemKeysRequest(BaseModel):
-    token: str
-    groq_api_key: str = ""
-    elevenlabs_api_key: str = ""
-    openrouter_api_key: str = ""
-    gemini_api_key: str = ""
-
-@app.post("/api/admin/save-system-keys")
-def save_system_keys(req: SystemKeysRequest):
-    global GLOBAL_SYSTEM_KEYS
-    if req.token != "admin-session-token-12345":
-        raise HTTPException(status_code=401, detail="غير مصرح بالدخول")
-    try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS system_keys (
-                key_name TEXT PRIMARY KEY,
-                key_value TEXT
-            )
-        """)
-        keys_map = {
-            "groq": req.groq_api_key.strip(),
-            "elevenlabs": req.elevenlabs_api_key.strip(),
-            "openrouter": req.openrouter_api_key.strip(),
-            "gemini": req.gemini_api_key.strip(),
-        }
-        for k, v in keys_map.items():
-            if v:
-                GLOBAL_SYSTEM_KEYS[k] = v
-                cursor.execute("INSERT OR REPLACE INTO system_keys (key_name, key_value) VALUES (?, ?)", (k, v))
-        conn.commit()
-        conn.close()
-
-        try:
-            import json
-            with open(ADMIN_KEYS_FILE, "w", encoding="utf-8") as f:
-                json.dump(GLOBAL_SYSTEM_KEYS, f, ensure_ascii=False, indent=2)
-            print("🔑 Saved system keys to admin_keys.json in backend successfully.", flush=True)
-        except Exception as e_file:
-            print(f"⚠️ Warning writing admin_keys.json in backend: {e_file}", flush=True)
-
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/admin/get-system-keys")
-def get_system_keys_api(token: str = None):
-    if token != "admin-session-token-12345":
-        raise HTTPException(status_code=401, detail="غير مصرح بالدخول")
-    try:
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("CREATE TABLE IF NOT EXISTS system_keys (key_name TEXT PRIMARY KEY, key_value TEXT)")
-        cursor.execute("SELECT key_name, key_value FROM system_keys")
-        rows = cursor.fetchall()
-        conn.close()
-        res_dict = {r[0]: r[1] for r in rows}
-        for k, v in GLOBAL_SYSTEM_KEYS.items():
-            if v and not res_dict.get(k):
-                res_dict[k] = v
-        return res_dict
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
