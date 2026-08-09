@@ -625,9 +625,10 @@ def transcribe_audio_with_gemini(audio_path: str, api_key: str, chunk_minutes: i
 def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes: int = 10, task_id: str = None) -> str:
     """
     Transcribes YouTube audio using Groq's whisper-large-v3-turbo API ultra-fast,
-    splitting audio into chunks if needed, and concatenates all timestamped segments.
+    splitting audio into chunks and processing them IN PARALLEL, then concatenates results.
     """
-    print(f"⚡ Transcribing full YouTube audio with Groq whisper-large-v3-turbo...", flush=True)
+    total_start = time.time()
+    print(f"⚡ Transcribing full YouTube audio with Groq whisper-large-v3-turbo (PARALLEL)...", flush=True)
     if task_id and task_id in TASKS:
         TASKS[task_id]["progress"] = "جاري التفريغ الفائق عبر Groq Whisper Large V3 Turbo..."
 
@@ -635,7 +636,6 @@ def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes
     chunk_pattern = os.path.join(dir_name, "chunk_%d.mp3")
     segment_time_sec = chunk_minutes * 60
 
-    
     split_cmd = [
         'ffmpeg', '-y',
         '-i', audio_path,
@@ -645,62 +645,101 @@ def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes
         chunk_pattern
     ]
     subprocess.run(split_cmd, capture_output=True)
-    
+
     import glob
     chunk_files = glob.glob(os.path.join(dir_name, "chunk_*.mp3"))
-    
+
     def get_chunk_idx(filepath):
         try:
             return int(os.path.basename(filepath).split('_')[1].split('.')[0])
         except:
             return 9999
-            
+
     chunk_files.sort(key=get_chunk_idx)
     if not chunk_files:
         chunk_files = [audio_path]
 
-    full_transcription_lines = []
     total_chunks = len(chunk_files)
+    chunks_results = [""] * total_chunks
+    completed_count = 0
 
-    for idx, c_path in enumerate(chunk_files):
+    def process_groq_chunk(args):
+        nonlocal completed_count
+        idx, c_path = args
         offset_seconds = idx * segment_time_sec
+        chunk_start = time.time()
+        lines = []
         try:
-            print(f"[*] Transcribing chunk {idx+1}/{total_chunks} with Groq...", flush=True)
-            if task_id and task_id in TASKS:
-                TASKS[task_id]["progress"] = f"جاري تفريغ الجزء {idx+1}/{total_chunks} عبر Groq..."
-                
+            print(f"[*] Chunk {idx+1}/{total_chunks}: sending to Groq...", flush=True)
             headers = {"Authorization": f"Bearer {groq_api_key.strip()}"}
-            with open(c_path, "rb") as file:
-                files = {"file": (os.path.basename(c_path), file, "audio/mpeg")}
+            with open(c_path, "rb") as f:
+                files = {"file": (os.path.basename(c_path), f, "audio/mpeg")}
                 data = {
                     "model": "whisper-large-v3-turbo",
                     "response_format": "verbose_json"
                 }
-                resp = requests.post("https://api.groq.com/openai/v1/audio/transcriptions", headers=headers, files=files, data=data, timeout=120)
+                resp = requests.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers=headers, files=files, data=data, timeout=120
+                )
                 resp.raise_for_status()
                 res_dict = resp.json()
 
             segments = res_dict.get("segments", [])
             for seg in segments:
                 s_start = float(seg.get("start", 0.0)) + offset_seconds
-                s_end = float(seg.get("end", 0.0)) + offset_seconds
-                text = seg.get("text", "").strip()
-
+                s_end   = float(seg.get("end",   0.0)) + offset_seconds
+                text    = seg.get("text", "").strip()
                 if text:
                     h1, m1, s1 = int(s_start // 3600), int((s_start % 3600) // 60), int(s_start % 60)
-                    h2, m2, s2 = int(s_end // 3600), int((s_end % 3600) // 60), int(s_end % 60)
-
+                    h2, m2, s2 = int(s_end   // 3600), int((s_end   % 3600) // 60), int(s_end   % 60)
                     t1 = f"{h1:02d}:{m1:02d}:{s1:02d}" if h1 > 0 else f"{m1:02d}:{s1:02d}"
                     t2 = f"{h2:02d}:{m2:02d}:{s2:02d}" if h2 > 0 else f"{m2:02d}:{s2:02d}"
+                    lines.append(f"[{t1} -> {t2}] {text}")
 
-                    full_transcription_lines.append(f"[{t1} -> {t2}] {text}")
+            chunk_elapsed = round(time.time() - chunk_start, 1)
+            completed_count += 1
+            msg = f"تم تفريغ الجزء {completed_count}/{total_chunks} ({chunk_elapsed}s)"
+            print(f"✅ Chunk {idx+1}/{total_chunks} done in {chunk_elapsed}s", flush=True)
+            if task_id and task_id in TASKS:
+                TASKS[task_id]["progress"] = msg
+
         except Exception as c_err:
-            print(f"⚠️ Groq chunk {idx+1} error: {c_err}", flush=True)
+            chunk_elapsed = round(time.time() - chunk_start, 1)
+            print(f"⚠️ Groq chunk {idx+1} error after {chunk_elapsed}s: {c_err}", flush=True)
+        finally:
+            try:
+                if c_path != audio_path and os.path.exists(c_path):
+                    os.remove(c_path)
+            except:
+                pass
+
+        return idx, lines
+
+    # Run all chunks in parallel
+    max_workers = min(6, total_chunks)
+    print(f"🔀 Running {total_chunks} chunks in parallel (max_workers={max_workers})...", flush=True)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(process_groq_chunk, (idx, cp)) for idx, cp in enumerate(chunk_files)]
+        for future in concurrent.futures.as_completed(futures):
+            idx, lines = future.result()
+            chunks_results[idx] = lines
+
+    full_transcription_lines = []
+    for lines in chunks_results:
+        full_transcription_lines.extend(lines)
+
+    total_elapsed = round(time.time() - total_start, 1)
+    print(f"🏁 Groq full transcription done in {total_elapsed}s total ({total_chunks} chunks parallel)", flush=True)
+    if task_id and task_id in TASKS:
+        TASKS[task_id]["progress"] = f"✅ اكتمل التفريغ في {total_elapsed} ثانية!"
 
     result_text = "\n".join(full_transcription_lines).strip()
     if not result_text:
         raise Exception("فشلت عملية التفريغ بـ Groq (قد يكون المفتاح غير صالح أو انتهت الحصة).")
     return result_text
+
 
 def clean_temp_dir(path: str):
     """Clean up the temporary directory after some delay or on request"""
