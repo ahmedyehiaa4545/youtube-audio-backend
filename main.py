@@ -1303,6 +1303,8 @@ def cut_video(req: CutRequest):
         '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
         '--force-keyframes-at-cuts',
         '-f', f"bestvideo[height<={req.quality}]+bestaudio/bestvideo[height<=1080]/best[height<={req.quality}]/best",
+        '--concurrent-fragments', '5',
+        '--extractor-args', 'youtube:player_client=android,web',
         '--merge-output-format', 'mp4',
         '-o', temp_raw_path
     ]
@@ -1405,6 +1407,8 @@ def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
             '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
             '--force-keyframes-at-cuts',
             '-f', f"bestvideo[height<={req.quality}]+bestaudio/bestvideo[height<=1080]/best[height<={req.quality}]/best",
+            '--concurrent-fragments', '5',
+            '--extractor-args', 'youtube:player_client=android,web',
             '--merge-output-format', 'mp4',
             '-o', temp_raw_path
         ]
