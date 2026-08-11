@@ -105,7 +105,7 @@ class SuggestShortsRequest(BaseModel):
     transcription: str
     geminiApiKey: str | None = None
     openrouterApiKey: str | None = None
-    openrouterModel: str | None = "google/gemini-2.5-pro-preview-05-06"
+    openrouterModel: str | None = "google/gemini-3.5-flash-lite"
     customPrompt: str | None = None
     titleStyle: str | None = "auto"
     numShorts: int = 3
@@ -931,7 +931,7 @@ def enforce_title_style(title: str, style: str) -> str:
                 
     return clean_title
 
-def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, model_name: str = "google/gemini-2.5-pro-preview-05-06", custom_prompt: str = None, title_style: str = "auto"):
+def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, model_name: str = "google/gemini-3.5-flash-lite", custom_prompt: str = None, title_style: str = "auto"):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -1032,7 +1032,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
         raise HTTPException(status_code=400, detail="Transcription content is empty.")
     
     openrouter_key = req.openrouterApiKey or os.environ.get("OPENROUTER_API_KEY")
-    openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-2.5-pro-preview-05-06"
+    openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-3.5-flash-lite"
     shorts_list = []
 
     if openrouter_key and openrouter_key.strip():
@@ -1106,7 +1106,7 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
         TASKS[task_id] = {"status": "processing", "progress": f"✨ جاري تحليل النص بالذكاء الاصطناعي واقتراح {req.numShorts} مقاطع Shorts..."}
 
         openrouter_key = req.openrouterApiKey or os.environ.get("OPENROUTER_API_KEY")
-        openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-2.5-pro-preview-05-06"
+        openrouter_model = req.openrouterModel if (req.openrouterModel and req.openrouterModel.strip()) else "google/gemini-3.5-flash-lite"
         shorts_list = []
 
         if openrouter_key and openrouter_key.strip():
