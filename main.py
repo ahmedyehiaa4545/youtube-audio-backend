@@ -995,14 +995,37 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         "response_format": {"type": "json_object"}
     }
     
-    res = requests.post(url, headers=headers, json=payload, timeout=90)
-    if res.status_code != 200:
-        raise Exception(f"OpenRouter API error (status {res.status_code}): {res.text}")
-    
-    data = res.json()
-    content = data['choices'][0]['message']['content']
-    import json
-    return json.loads(content)
+    max_attempts = 4
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print(f"⚡ OpenRouter suggest_shorts attempt {attempt}/{max_attempts} with model: {model_name}...", flush=True)
+            res = requests.post(url, headers=headers, json=payload, timeout=90)
+            if res.status_code != 200:
+                raise Exception(f"OpenRouter API error (status {res.status_code}): {res.text}")
+            
+            data = res.json()
+            choices = data.get('choices', [])
+            if not choices:
+                raise Exception("OpenRouter returned no choices.")
+                
+            content = choices[0].get('message', {}).get('content', '')
+            if not content or not content.strip():
+                raise Exception("OpenRouter returned empty content.")
+                
+            import json
+            parsed = json.loads(content.strip())
+            if isinstance(parsed, dict) and "shorts" in parsed and len(parsed["shorts"]) > 0:
+                print(f"✨ OpenRouter suggest_shorts succeeded on attempt {attempt} with model {model_name}!", flush=True)
+                return parsed
+            else:
+                raise Exception("OpenRouter JSON missing 'shorts' array or empty shorts.")
+        except Exception as e:
+            last_err = e
+            print(f"⚠️ OpenRouter suggest_shorts attempt {attempt}/{max_attempts} failed ({e}). Retrying same model...", flush=True)
+            time.sleep(1.5)
+
+    raise Exception(f"OpenRouter failed after {max_attempts} retries with model {model_name}: {last_err}")
 
 def extract_single_sentence_hook(script_text: str) -> str:
     if not script_text:
