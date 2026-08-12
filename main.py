@@ -343,7 +343,7 @@ def download_audio_via_rapidapi(youtube_url: str, output_path: str, task_id: str
         'Content-Type': 'application/json'
     }
 
-    update_task("🌐 جارٍ طلب تحويل الصوت من خادم RapidAPI...")
+    update_task("⚡ جاري تحميل ملف الصوت المباشر...")
     print(f"[*] Sending download request to RapidAPI for video ID: {video_id}...", flush=True)
     api_url = "https://youtube-mp4-mp3-downloader.p.rapidapi.com/api/v1/download"
     params = {
@@ -392,7 +392,7 @@ def download_audio_via_rapidapi(youtube_url: str, output_path: str, task_id: str
     if not download_url:
         raise Exception("استغرق خادم التحويل وقتاً طويلاً. يرجى المحاولة مرة أخرى أو استخدام فيديو أقصر.")
 
-    update_task("📥 جارٍ تنزيل ملف MP3 الأصلي...")
+    update_task("⚡ جاري تهيئة ومعالجة ملف الصوت...")
     print("[*] Downloading MP3 file from RapidAPI...", flush=True)
     audio_res = requests.get(download_url, stream=True, timeout=60)
     if audio_res.status_code != 200:
@@ -415,7 +415,7 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
         if task_id and task_id in TASKS:
             TASKS[task_id]["progress"] = msg
 
-    update_task("⚡ جاري استخراج وتنزيل الصوت مباشرة بـ yt-dlp...")
+    update_task("⚡ جاري استخراج الملف الصوتي بنجاح...")
     print(f"⚡ Attempting fast direct audio extraction via yt-dlp for {youtube_url}...", flush=True)
 
     try:
@@ -447,7 +447,7 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
                     break
 
         if downloaded_file and os.path.exists(downloaded_file) and os.path.getsize(downloaded_file) > 0:
-            update_task("⚡ جارٍ تحويل كودك الصوت إلى MP3 بسرعة...")
+            update_task("⚡ جاري معالجة وتجهيز الصوت...")
             print(f"🚀 Audio stream downloaded ({os.path.getsize(downloaded_file)} bytes). Fast converting to MP3 via ffmpeg...", flush=True)
             
             ffmpeg_cmd = [
@@ -472,7 +472,7 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
     except Exception as e:
         print(f"⚠️ Direct yt-dlp extraction error ({e}). Falling back to RapidAPI...", flush=True)
 
-    update_task("🌐 جارٍ استخراج الصوت عبر خادم التنزيل السريع (RapidAPI)...")
+    update_task("⚡ جاري استخراج الملف الصوتي...")
     return download_audio_via_rapidapi(youtube_url, output_path, task_id)
 
 # دالة لضبط التوقيتات برمجياً (رياضياً)
@@ -631,7 +631,7 @@ def transcribe_audio_with_groq(audio_path: str, groq_api_key: str, chunk_minutes
     total_start = time.time()
     print(f"⚡ Transcribing full YouTube audio with Groq whisper-large-v3-turbo (PARALLEL)...", flush=True)
     if task_id and task_id in TASKS:
-        TASKS[task_id]["progress"] = "جاري التفريغ الفائق عبر Groq Whisper Large V3 Turbo..."
+        TASKS[task_id]["progress"] = "⚡ جاري التفريغ النصي الذكي والسريع..."
 
     dir_name = os.path.dirname(audio_path)
     chunk_pattern = os.path.join(dir_name, "chunk_%d.mp3")
@@ -786,7 +786,7 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
             
         if groq_api_key and groq_api_key.strip():
             print(f"[{task_id}] Background: Transcribing audio with Groq Whisper Large V3 Turbo...", flush=True)
-            TASKS[task_id]["progress"] = "⚡ جاري التفريغ السريع بـ Groq Whisper Large V3 Turbo..."
+            TASKS[task_id]["progress"] = "⚡ جاري التفريغ النصي الذكي والسريع..."
             transcription_text = transcribe_audio_with_groq(
                 audio_path=audio_path,
                 groq_api_key=groq_api_key.strip(),
@@ -824,7 +824,7 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
     has_gemini = req.geminiApiKey and req.geminiApiKey.strip() not in ["", "none", "null"]
     
     if not has_groq and not has_gemini:
-        raise HTTPException(status_code=400, detail="يرجى إدخال مفتاح Groq API Key أو Gemini API Key لتفريغ الصوت.")
+        raise HTTPException(status_code=400, detail="يرجى إدخال مفتاح الذكاء الاصطناعي لتفريغ الصوت.")
         
     task_id = str(uuid.uuid4())
     task_dir = os.path.join(PUBLIC_DIR, f"temp_{task_id}")
