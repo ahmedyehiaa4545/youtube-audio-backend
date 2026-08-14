@@ -1621,19 +1621,20 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
         cap.release()
         raise Exception("بيانات أبعاد الفيديو أو عدد الفريمات غير صالحة.")
 
-    target_w = int(H * 9 / 16)
-    if target_w % 2 != 0:
-        target_w += 1
-    if target_w > W:
-        target_w = W if W % 2 == 0 else W - 1
-
-    out_h = H if H % 2 == 0 else H - 1
+    out_w, out_h = 1080, 1920
+    half_h = out_h // 2
+    target_w = int(H * (9 / 16))
 
     if progress_callback:
-        progress_callback("🔍 جاري تحليل وتحديد المشاهد (Scene Detection)...")
+        progress_callback("🔍 جاري تحليل وتحديد المشاهد (Fast Scene Detection)...")
 
-    scene_list = detect(video_path, ContentDetector(threshold=27.0))
-    raw_cuts = [0] + [s[1].get_frames() for s in scene_list]
+    # 1. Fast Scene Detection with downscaling
+    try:
+        scene_list = detect(video_path, ContentDetector(threshold=27.0, min_scene_len=int(fps * 0.8)), start_in_scene=True)
+        raw_cuts = [0] + [s[1].get_frames() for s in scene_list]
+    except Exception:
+        raw_cuts = [0, total_frames]
+
     if not raw_cuts or raw_cuts[-1] < total_frames:
         raw_cuts.append(total_frames)
 
@@ -1651,60 +1652,108 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
             segments = [(0, total_frames)]
 
     if progress_callback:
-        progress_callback(f"👥 جاري تحليل الوجوه وتحديد الكادر لـ {len(segments)} مشهد...")
+        progress_callback(f"👥 جاري تحليل الوجوه والكاميرات لـ {len(segments)} مشهد...")
 
+    # 2. Fast sampling per scene using lightweight resized frames
     mp_face = mp.solutions.face_detection
-    detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+    detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.3)
+    scene_plans = []
 
-    def sample_scene_faces(start_f, end_f):
-        boxes = []
+    for s_idx, (start_f, end_f) in enumerate(segments):
         dur = (end_f - start_f) / fps
-        n = int(max(5, min(15, dur)))
-        idxs = [start_f + int((end_f - start_f) * t) for t in np.linspace(0.05, 0.95, n)]
+        n = int(max(4, min(10, dur * 1.5)))
+        idxs = [start_f + int((end_f - start_f) * t) for t in np.linspace(0.08, 0.92, n)]
+        
+        frame_detections = []
         for idx in idxs:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
-            res = detector.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            
+            small_frame = cv2.resize(frame, (640, int(640 * (H / W))))
+            rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+            res = detector.process(rgb)
+            
             if res.detections:
+                current_faces = []
                 for d in res.detections:
                     bb = d.location_data.relative_bounding_box
-                    x1 = max(0, int(bb.xmin * W))
-                    x2 = min(W, int((bb.xmin + bb.width) * W))
-                    if (x2 - x1) > W * 0.04:
-                        boxes.append((x1, x2))
-        return boxes
+                    cx = int((bb.xmin + bb.width / 2) * W)
+                    cy = int((bb.ymin + bb.height / 2) * H)
+                    fw = int(bb.width * W)
+                    if fw > W * 0.04:
+                        current_faces.append((cx, cy))
+                if current_faces:
+                    frame_detections.append(current_faces)
 
-    def compute_x1(boxes):
-        if not boxes:
-            return (W - target_w) // 2
-        leftmost = min(a for a, _ in boxes)
-        rightmost = max(b for _, b in boxes)
-        centers = np.array([(a + b) / 2 for a, b in boxes])
-        anchor = float(np.median(centers))
+        # Decide mode for this scene: Split (wide shot 2 speakers) or Single (1 speaker close-up/medium)
+        dual_count = 0
+        left_xs, right_xs, all_ys, all_xs = [], [], [], []
 
-        if (rightmost - leftmost) <= target_w * 0.98:
-            x1 = (leftmost + rightmost) / 2 - target_w / 2
+        for f_faces in frame_detections:
+            if len(f_faces) >= 2:
+                xs = sorted([f[0] for f in f_faces])
+                if (xs[-1] - xs[0]) > target_w * 0.70:
+                    dual_count += 1
+            for cx, cy in f_faces:
+                all_xs.append(cx)
+                all_ys.append(cy)
+                if cx < W * 0.46:
+                    left_xs.append(cx)
+                elif cx > W * 0.54:
+                    right_xs.append(cx)
+
+        is_split = False
+        if dual_count >= 1 or (len(left_xs) >= 2 and len(right_xs) >= 2 and (np.median(right_xs) - np.median(left_xs)) > target_w * 0.75):
+            is_split = True
+
+        if is_split:
+            cx1 = int(np.median(left_xs)) if left_xs else int(W * 0.25)
+            cx2 = int(np.median(right_xs)) if right_xs else int(W * 0.75)
+            cy_avg = int(np.median(all_ys)) if all_ys else int(H * 0.38)
+
+            crop_w = int(min(W * 0.48, H * (1080 / 960) * 0.75))
+            crop_h = int(crop_w * (960 / 1080))
+
+            x1 = max(0, min(W - crop_w, cx1 - crop_w // 2))
+            y1 = max(0, min(H - crop_h, cy_avg - int(crop_h * 0.42)))
+            x2 = max(0, min(W - crop_w, cx2 - crop_w // 2))
+            y2 = max(0, min(H - crop_h, cy_avg - int(crop_h * 0.42)))
+
+            plan = {"mode": "split", "crop_w": crop_w, "crop_h": crop_h, "top": (x1, y1), "bottom": (x2, y2)}
         else:
-            x1 = anchor - target_w / 2
-        return int(max(0, min(x1, W - target_w)))
+            median_x = int(np.median(all_xs)) if all_xs else W // 2
+            x1 = max(0, min(W - target_w, median_x - target_w // 2))
+            plan = {"mode": "single", "x1": x1, "target_w": target_w}
 
-    scene_x1 = [compute_x1(sample_scene_faces(a, b)) for a, b in segments]
+        scene_plans.append(plan)
+
     detector.close()
 
+    # 3. Fast FFmpeg encoder setup
+    has_gpu = False
+    try:
+        gpu_check = subprocess.run(["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if gpu_check.returncode == 0:
+            has_gpu = True
+    except Exception:
+        pass
+
+    codec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "20"] if has_gpu else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "0"]
+
     if progress_callback:
-        progress_callback("⚡ جاري اقتصاص وقص الفيديو طولي (9:16) ومعالجة الإطارات...")
+        progress_callback("⚡ جاري اقتصاص ورندرة الفيديو طولي (9:16) فائق السرعة...")
 
     cmd = [
         "ffmpeg", "-y",
         "-f", "rawvideo", "-pix_fmt", "bgr24",
-        "-s", f"{target_w}x{out_h}", "-r", str(fps),
+        "-s", f"{out_w}x{out_h}", "-r", str(fps),
         "-i", "-",
         "-i", video_path,
         "-map", "0:v", "-map", "1:a?",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-        "-pix_fmt", "yuv420p", "-profile:v", "high",
+        *codec_args,
+        "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         "-shortest", output_path
@@ -1714,17 +1763,41 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     seg_i, frame_i = 0, 0
+    out_frame = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+
     while True:
         ok, frame = cap.read()
         if not ok or frame is None:
             break
+        
         while seg_i + 1 < len(segments) and frame_i >= segments[seg_i][1]:
             seg_i += 1
-        x1 = scene_x1[seg_i]
-        crop = frame[0:out_h, x1:x1 + target_w]
-        proc.stdin.write(crop.tobytes())
+        
+        plan = scene_plans[seg_i]
+
+        if plan["mode"] == "split":
+            x1, y1 = plan["top"]
+            cw, ch = plan["crop_w"], plan["crop_h"]
+            top_crop = frame[y1:y1 + ch, x1:x1 + cw]
+            top_scaled = cv2.resize(top_crop, (out_w, half_h), interpolation=cv2.INTER_LINEAR)
+
+            x2, y2 = plan["bottom"]
+            bottom_crop = frame[y2:y2 + ch, x2:x2 + cw]
+            bottom_scaled = cv2.resize(bottom_crop, (out_w, half_h), interpolation=cv2.INTER_LINEAR)
+
+            out_frame[:half_h, :] = top_scaled
+            out_frame[half_h:, :] = bottom_scaled
+            out_frame[half_h - 1 : half_h + 1, :] = 25
+        else:
+            x1 = plan["x1"]
+            tw = plan["target_w"]
+            crop = frame[0:H, x1:x1 + tw]
+            out_frame = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+
+        proc.stdin.write(out_frame.tobytes())
         frame_i += 1
-        if frame_i % 150 == 0 and progress_callback:
+        
+        if frame_i % 120 == 0 and progress_callback:
             percent = int((frame_i / total_frames) * 100)
             progress_callback(f"🎬 جاري معالجة الإطارات: {frame_i}/{total_frames} ({percent}%)...")
 
