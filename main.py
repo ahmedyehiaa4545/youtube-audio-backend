@@ -341,9 +341,13 @@ def snap_short_timestamps_to_sentences(transcription: str, start_time: str, end_
 
     def format_secs(s: float) -> str:
         s = max(0, s)
-        m = int(s // 60)
+        h = int(s // 3600)
+        m = int((s % 3600) // 60)
         sec = int(s % 60)
-        return f"{m:02d}:{sec:02d}"
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{sec:02d}"
+        else:
+            return f"{m:02d}:{sec:02d}"
 
     return format_secs(snapped_start), format_secs(snapped_end)
 
