@@ -304,6 +304,49 @@ def parse_transcription_segments(transcription: str):
                 
     return segments
 
+def snap_short_timestamps_to_sentences(transcription: str, start_time: str, end_time: str) -> tuple[str, str]:
+    """
+    محاذاة توقيت البداية والنهاية تلقائياً لأقرب حدود جملة طبيعية ومكتملة،
+    لمنع قطع الكلام في منتصف الجملة أو قبل اكتمال قفلة الفكرة.
+    """
+    try:
+        start_sec = parse_time_to_seconds(start_time)
+        end_sec = parse_time_to_seconds(end_time)
+    except Exception:
+        return start_time, end_time
+
+    segments = parse_transcription_segments(transcription)
+    if not segments:
+        return start_time, end_time
+
+    # 1. محاذاة البداية لأول جملة تبدأ عند أو قبل start_sec بقليل
+    snapped_start = start_sec
+    for seg in segments:
+        if seg["start"] <= start_sec <= seg["end"] or (abs(seg["start"] - start_sec) <= 2.0):
+            snapped_start = seg["start"]
+            break
+
+    # 2. محاذاة النهاية لآخر جملة كاملة حتى لا يتم قطع المتحدث قبل أن يختم كلمته
+    snapped_end = end_sec
+    matching_segs = [s for s in segments if s["start"] >= (snapped_start - 0.5) and s["start"] < end_sec]
+    if matching_segs:
+        last_seg = matching_segs[-1]
+        # إذا كانت الجملة الأخيرة تمتد قليلاً بعد end_sec (حتى 5 ثوانٍ)، نمد النهاية حتى تكتمل الجملة بالكامل
+        if last_seg["end"] >= end_sec:
+            snapped_end = last_seg["end"]
+        elif (end_sec - last_seg["end"]) < 3.0:
+            snapped_end = last_seg["end"]
+        else:
+            snapped_end = max(end_sec, last_seg["end"])
+
+    def format_secs(s: float) -> str:
+        s = max(0, s)
+        m = int(s // 60)
+        sec = int(s % 60)
+        return f"{m:02d}:{sec:02d}"
+
+    return format_secs(snapped_start), format_secs(snapped_end)
+
 def rebuild_script_for_short(transcription: str, start_time: str, end_time: str, fallback_script: str) -> str:
     try:
         start_sec = parse_time_to_seconds(start_time)
@@ -315,7 +358,7 @@ def rebuild_script_for_short(transcription: str, start_time: str, end_time: str,
     matching_texts = []
     
     for seg in segments:
-        if seg["start"] < (end_sec - 0.01) and seg["end"] > (start_sec + 0.01):
+        if seg["start"] < (end_sec + 0.1) and seg["end"] > (start_sec - 0.1):
             matching_texts.append(seg["text"])
             
     rebuilt = " ".join(matching_texts).strip()
@@ -986,12 +1029,19 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         "X-Title": "ReKaption"
     }
     system_prompt = (
-        "أنت خبير ومخرج محترف في صناعة المحتوى الفيروسي الأكثر مشاهدة على تيك توك ويوتيوب وريلز (Viral Content Creator & Growth Hacker).\n"
-        "مهمتك الرئيسية: قراءة وفهم سكربت كل مقطع مقصوص بدقة شديدة واستيعاب الفكرة الحصرية التي تدور داخل هذا المقطع بالذات، ثم صياغة عنوان فيروسي خاص بهذا المقطع يثير الفضول الرهيب (Curiosity Gap & Suspense) ويجبر المشاهد على النقر والمتابعة حتى النهاية.\n"
+        "أنت خبير ومخرج ومونتير محترف في صناعة واقتطاع المحتوى الفيروسي الأكثر انتشاراً وتأثيراً على TikTok و Shorts و Reels (Viral Content Creator & Master Storyteller).\n"
+        "مهمتك الأساسية والجوهرية: تحليل النص المفرغ واستخراج مقاطع قصيرة (Shorts) مميزة ومكتملة البنية تماماً (بداية مشوقة + سياق قوي + قفلة ختامية منطقية ومقنعة 100%).\n"
+        "\n"
+        "قواعد القفلة الختامية المنطقية (ممنوع القطع العشوائي أو المبتور نهائياً):\n"
+        "1. اكتمال المعنى والنتيجة (Logical Punchline & Resolution): يجب أن ينتهي المقطع دائماً عند نهاية جملة تامة مكتملة الأركان (نتيجة الموقف، الصدمة، العبرة، القاعدة الذهبية، أو خلاصة الفكرة). يُمنع منعاً باتاً إنهاء المقطع في منتصف جملة، أو عند سؤال معلق لم تتم الإجابة عليه، أو عند كلمات عطف ووصل (مثل: 'و...', 'لكن...', 'عشان...', 'لأن...', 'بس...', 'ثم...').\n"
+        "2. لكل قصة أو موقف أو حكاية (Story / Narrative): يجب أن يمتد المقطع حتى إتمام النتيجة ورد الفعل النهائي ليفهم المشاهد القصة كاملة من البداية للنهاية دون أي غموض أو شعور بالبتر.\n"
+        "3. لكل نصيحة أو معلومة (Insight / Advice): يجب أن يختم المقطع بالخلاصة أو القاعدة التي يقدمها المتحدث بوضوح تام.\n"
+        "4. توقيت النهاية (end_time): اضبط توقيت النهاية ليتطابق مع نهاية آخر جملة تامة مكتملة في سياق المقطع.\n"
+        "\n"
         "شروط العنوان الإلزامية:\n"
         "1. الارتباط العميق بسكربت هذا المقطع تحديداً: يجب أن يغطي العنوان الحدث أو السر أو الصدمة أو الموقف الفعلي الذي يدور داخل هذا الشورت، وممنوع منعاً باتاً العناوين العامة المكررة التي تصلح لأي فيديو.\n"
         "2. القوة والجرأة وإثارة الفضول (Curiosity Hook): اصنع عنواناً يطرح تساؤلاً أو يكشف جزءاً مثيراً دون حرق الخاتمة ليجعل المشاهد يكمل الفيديو لنهايته.\n"
-        "3. السلامة الإملائية واللغوية 100%: يجب أن يكون العنوان خالياً تماماً من أي أخطاء إملائية أو نحوية (انتبه للهمزات 'أ/إ/آ'، التاء المربوطة 'ة' والهاء 'ه'، وتنوين الفتح 'ـاً' مثل: شكراً، جداً، عاماً، ريالاً)، حتى لو كان السكربت المفرغ يحتوي على أخطاء من التفريغ الصوتي.\n"
+        "3. السلامة الإملائية واللغوية 100%: يجب أن يكون العنوان خالياً تماماً من أي أخطاء إملائية أو نحوية (انتبه للهمزات 'أ/إ/آ'، التاء المربوطة 'ة' والهاء 'ه'، وتنوين الفتح 'ـاً' مثل: شكراً، جداً، عاماً، ريالاً).\n"
         "يجب أن تكون إجابتك بصيغة JSON فقط بالتنسيق التالي بدون أي نصوص إضافية خارج الـ JSON:\n"
         "{\n"
         '  "shorts": [\n'
@@ -999,7 +1049,7 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         '      "title": "عنوان جريء ومثير يغطي قصة هذا المقطع بالذات وخالٍ تماماً من الأخطاء الإملائية",\n'
         '      "start_time": "05:47",\n'
         '      "end_time": "06:20",\n'
-        '      "script": "النص الكامل للمقطع القصير كما ورد في التفريغ",\n'
+        '      "script": "النص الكامل للمقطع القصير كما ورد في التفريغ من البداية وحتى القفلة الكاملة",\n'
         '      "hook": "الجملة الافتتاحية في أول 3 ثواني"\n'
         '    }\n'
         '  ]\n'
@@ -1152,8 +1202,14 @@ async def suggest_shorts(req: SuggestShortsRequest):
 
     max_secs = get_max_transcription_seconds(req.transcription)
     for s in shorts_list:
-        s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
-        s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+        raw_start = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
+        raw_end = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+
+        # محاذاة البداية والنهاية لحدود الجمل الطبيعية لمنع أي قطع في منتصف الكلام أو قبل القفلة
+        snapped_start, snapped_end = snap_short_timestamps_to_sentences(req.transcription, raw_start, raw_end)
+        s["start_time"] = snapped_start
+        s["end_time"] = snapped_end
+
         s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
         s["script"] = rebuild_script_for_short(
             transcription=req.transcription,
@@ -1211,8 +1267,10 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
             prompt = (
                 "أنت خبير ومخرج محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
                 f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة جداً.\n"
-                "شرط العناوين الجريئة والحماسية (Curiosity Gap): إياك والعناوين التقليدية العامة. اختر أجرأ وأكثر نقطة تشويقية وصادمة داخل القصة واجعلها عنواناً مثيراً يجبر المشاهد على النقر وإكمال المقطع لآخره.\n"
-                "شروط المدة واكتمال الحكاية: تتراوح مدة المقاطع العادية بين 30 ثانية و 150 ثانية (دقيقتين ونصف). أما للمواقف والقصص والمقالب (Story / Narrative): يمنع قطع القصة في منتصفها ويجب استمرار المقطع حتى اكتمال القفلة والخاتمة بالكامل، ويُسمح بالامتداد خصيصاً للقصص والمواقف حتى 210 ثانية (3 دقائق ونصف كحد أقصى) لضمان اكتمال الحكاية دون بتر.\n\n"
+                "قواعد القفلة الختامية المنطقية (ممنوع القطع المبتور نهائياً):\n"
+                "1. اكتمال المعنى والنتيجة (Logical Punchline & Takeaway): يجب أن ينتهي المقطع دائماً عند نهاية جملة تامة مكتملة الأركان (نتيجة الموقف، الصدمة، العبرة، أو خلاصة الفكرة). يُمنع منعاً باتاً إنهاء المقطع في منتصف جملة، أو عند سؤال معلق لم تتم الإجابة عليه، أو عند كلمات عطف ووصل (مثل: 'و...', 'لكن...', 'عشان...', 'لأن...', 'بس...').\n"
+                "2. لكل قصة أو موقف (Story): يجب أن يمتد المقطع حتى إتمام النتيجة ورد الفعل النهائي ليفهم المشاهد القصة كاملة دون أي غموض أو بتر.\n"
+                "3. شرط العناوين الجريئة والمحددة: اختر عنواناً مثيراً وجريئاً يغطي قصة وسياق هذا المقطع بالذات.\n\n"
             )
             if req.customPrompt and req.customPrompt.strip():
                 prompt += f"⚠️ توجيهات إضافية مخصصة من المستخدم (يجب الالتزام بها بصرامة):\n{req.customPrompt.strip()}\n\n"
@@ -1227,8 +1285,14 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
 
         max_secs = get_max_transcription_seconds(req.transcription)
         for s in shorts_list:
-            s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
-            s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+            raw_start = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
+            raw_end = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
+
+            # محاذاة البداية والنهاية لحدود الجمل الطبيعية
+            snapped_start, snapped_end = snap_short_timestamps_to_sentences(req.transcription, raw_start, raw_end)
+            s["start_time"] = snapped_start
+            s["end_time"] = snapped_end
+
             s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
 
             s["script"] = rebuild_script_for_short(
