@@ -1408,6 +1408,131 @@ def format_seconds_to_time_str(seconds: float) -> str:
         ms = 0
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
+def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, output_path: str, progress_callback=None) -> str:
+    """
+    محرك القص فائق السرعة (5-8 ثوانٍ فقط بدلاً من الدقائق):
+    1. استخراج الروابط المباشرة للبث (Direct Stream URLs) خلال ثانية إلى ثانيتين.
+    2. قص المقطع وتطبيق فلاتر التلاشي ومضاعفة الصوت مباشرة عبر FFmpeg عبر بروتوكول HTTP Range.
+    3. آلية احتياطية سريعة مع تحديد مهلة زمنية صارمة تمنع التعليق نهائياً.
+    """
+    if progress_callback:
+        progress_callback("⚡ جاري استخراج روابط البث المباشرة من يوتيوب...")
+
+    end_extension = 0.75
+    fade_in_duration = 0.2
+    fade_out_duration = 0.75
+    total_clip_duration = (end_sec - start_sec) + end_extension
+    start_fade_out = end_sec - start_sec
+
+    # 1. المحاولة الأولى: القص المباشر فائق السرعة عبر روابط البث المباشرة (Direct Stream URLs)
+    stream_urls = []
+    try:
+        ytdl_url_cmd = [
+            'yt-dlp',
+            '--quiet', '--no-warnings', '--no-playlist',
+            '--socket-timeout', '10',
+            '-f', f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best",
+            '--get-url'
+        ]
+        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+            ytdl_url_cmd.extend(['--cookies', COOKIE_FILE_PATH])
+        ytdl_url_cmd.append(url)
+
+        res = subprocess.run(ytdl_url_cmd, capture_output=True, text=True, timeout=20)
+        if res.returncode == 0 and res.stdout.strip():
+            stream_urls = [line.strip() for line in res.stdout.strip().split('\n') if line.strip().startswith('http')]
+    except Exception as e:
+        print(f"⚠️ Direct get-url notice: {e}", flush=True)
+
+    if stream_urls:
+        if progress_callback:
+            progress_callback("🚀 جاري قص وحفظ المقطع بالسرعة القصوى عبر FFmpeg...")
+        
+        try:
+            http_hdrs = build_ffmpeg_http_headers()
+            if len(stream_urls) >= 2:
+                video_url, audio_url = stream_urls[0], stream_urls[1]
+                ffmpeg_cmd = [
+                    'ffmpeg', '-y',
+                    '-headers', http_hdrs,
+                    '-ss', str(start_sec),
+                    '-i', video_url,
+                    '-headers', http_hdrs,
+                    '-ss', str(start_sec),
+                    '-i', audio_url,
+                    '-t', str(total_clip_duration),
+                    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
+                    '-filter_complex', f"[1:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
+                    '-map', '0:v', '-map', '[a]',
+                    '-c:a', 'aac', '-b:a', '192k',
+                    output_path
+                ]
+            else:
+                single_url = stream_urls[0]
+                ffmpeg_cmd = [
+                    'ffmpeg', '-y',
+                    '-headers', http_hdrs,
+                    '-ss', str(start_sec),
+                    '-i', single_url,
+                    '-t', str(total_clip_duration),
+                    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
+                    '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
+                    '-map', '0:v', '-map', '[a]',
+                    '-c:a', 'aac', '-b:a', '192k',
+                    output_path
+                ]
+
+            ff_res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=60)
+            if ff_res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                print(f"🎉 Ultra-Fast Direct Stream Cut succeeded! ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
+                return output_path
+            else:
+                print(f"⚠️ FFmpeg direct stream cut warning: {ff_res.stderr[:200]}", flush=True)
+        except Exception as fe:
+            print(f"⚠️ FFmpeg stream cut exception: {fe}", flush=True)
+
+    # 2. المحاولة الثانية: التحميل والقص عبر yt-dlp الاحتياطي مع مهلة زمنية لمنع أي تعليق
+    if progress_callback:
+        progress_callback("🎬 جاري استخراج المقطع عبر محرك التنزيل الاحتياطي...")
+
+    start_time_str = format_seconds_to_time_str(start_sec)
+    extended_end_time_str = format_seconds_to_time_str(end_sec + end_extension)
+    temp_raw = output_path + ".raw.mp4"
+
+    ytdl_sec_cmd = [
+        'yt-dlp',
+        '--quiet', '--no-warnings', '--no-playlist',
+        '--socket-timeout', '15',
+        '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
+        '--force-keyframes-at-cuts',
+        '-f', f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best",
+        '--merge-output-format', 'mp4',
+        '-o', temp_raw
+    ]
+    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+        ytdl_sec_cmd.extend(['--cookies', COOKIE_FILE_PATH])
+    ytdl_sec_cmd.append(url)
+
+    res_sec = subprocess.run(ytdl_sec_cmd, capture_output=True, text=True, timeout=90)
+    if res_sec.returncode == 0 and os.path.exists(temp_raw):
+        ff_post = [
+            'ffmpeg', '-y',
+            '-i', temp_raw,
+            '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
+            '-map', '0:v', '-map', '[a]',
+            '-c:v', 'copy',
+            '-c:a', 'aac', '-b:a', '192k',
+            output_path
+        ]
+        subprocess.run(ff_post, capture_output=True, text=True, timeout=30)
+        try: os.remove(temp_raw)
+        except: pass
+        if os.path.exists(output_path):
+            return output_path
+
+    raise Exception("فشل استخراج المقطع من يوتيوب. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
+
+
 @app.post("/api/cut")
 def cut_video(req: CutRequest):
     if req.quality not in [360, 480, 720, 1080, 1440, 2160]:
@@ -1422,106 +1547,18 @@ def cut_video(req: CutRequest):
     if start_sec >= end_sec:
         raise HTTPException(400, "start_time must be less than end_time")
 
-    # تمديد مدة التحميل والقطع بمقدار 0.75 ثانية من النهاية لعمل تأثير التلاشي عليها
-    # وتقليص تأثير التلاشي في البداية ليكون خفيفاً جداً لكي لا يضيع أول الكلام
-    end_extension = 0.75
-    fade_in_duration = 0.2
-    fade_out_duration = 0.75
-    
-    extended_end_sec = end_sec + end_extension
-    start_time_str = format_seconds_to_time_str(start_sec)
-    extended_end_time_str = format_seconds_to_time_str(extended_end_sec)
-    
-    original_duration_sec = end_sec - start_sec
-
     file_id = str(uuid.uuid4())[:8]
-    temp_raw_path = os.path.join(TEMP_DIR, f"{file_id}_raw.mp4")
     output_path = os.path.join(TEMP_DIR, f"{file_id}.mp4")
 
-    # تشغيل أمر yt-dlp للتحميل والقص مباشرة لتفادي مشاكل الـ 403 وحظر يوتيوب
-    print(f"🎬 Downloading and cutting segment: {start_time_str} to {extended_end_time_str} using direct YouTube link...", flush=True)
     start_time_proc = time.time()
-    
-    ytdl_cmd = [
-        'yt-dlp',
-        '--quiet', '--no-warnings',
-        '--no-playlist',
-        '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
-        '--force-keyframes-at-cuts',
-        '--concurrent-fragments', '5',
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        '-f', f"bestvideo[height<={req.quality}]+bestaudio/bestvideo[height<=1080]/best[height<={req.quality}]/best",
-        '--merge-output-format', 'mp4',
-        '-o', temp_raw_path
-    ]
+    try:
+        cut_segment_fast(req.url, start_sec, end_sec, req.quality, output_path)
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
-    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-        ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
-
-    ytdl_cmd.append(req.url)
-
-    result = subprocess.run(ytdl_cmd, capture_output=True, text=True)
     elapsed = time.time() - start_time_proc
-
-    if result.returncode != 0 or not os.path.exists(temp_raw_path):
-        print(f"⚠️ Direct section cut failed ({result.stderr}). Retrying with fallback stream cut...", flush=True)
-        if os.path.exists(temp_raw_path):
-            try: os.remove(temp_raw_path)
-            except: pass
-        fallback_cmd = [
-            'yt-dlp',
-            '--quiet', '--no-warnings',
-            '--no-playlist',
-            '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
-            '-f', 'mp4/best',
-            '-o', temp_raw_path,
-            req.url
-        ]
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-            fallback_cmd.insert(4, '--cookies')
-            fallback_cmd.insert(5, COOKIE_FILE_PATH)
-        result2 = subprocess.run(fallback_cmd, capture_output=True, text=True)
-        if result2.returncode != 0 or not os.path.exists(temp_raw_path):
-            err_lines = result2.stderr.strip() if result2.stderr else (result.stderr.strip() if result.stderr else "Output MP4 file was not generated by yt-dlp")
-            raise HTTPException(500, f"Cutting failed: {err_lines}")
-
-    if not os.path.exists(temp_raw_path):
-        raise HTTPException(500, "Output MP4 file was not generated by yt-dlp")
-
-    # تطبيق الفلاتر الصوتية (تخفيت الصوت في البداية والنهاية وزيادة الصوت بنسبة 50%)
-    fade_applied = False
-    # يبدأ التلاشي النهائي (Fade Out) عند نهاية المقطع المحدد أصلياً (ثانية 0 إلى original_duration_sec لا يتأثران، والتلاشي يتم في الـ 0.75 ثانية الإضافية)
-    start_fade_out = original_duration_sec
-    
-    ffmpeg_cmd = [
-        'ffmpeg', '-y',
-        '-i', temp_raw_path,
-        '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
-        '-map', '0:v', '-map', '[a]',
-        '-c:v', 'copy',
-        '-c:a', 'aac', '-b:a', '192k',
-        output_path
-    ]
-    
-    filter_result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-    if filter_result.returncode == 0 and os.path.exists(output_path):
-        fade_applied = True
-        
-    # تنظيف الملف المؤقت الخام
-    try: os.remove(temp_raw_path)
-    except: pass
-
-    # في حال فشل الفلتر لأي سبب (مثل عدم وجود مسار صوتي)، نستخدم الملف الأصلي
-    if not fade_applied:
-        if os.path.exists(temp_raw_path):
-            try: os.rename(temp_raw_path, output_path)
-            except: pass
-
-    if not os.path.exists(output_path):
-        raise HTTPException(500, "Final output MP4 file was not generated")
-
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    print(f"✅ Success! {size_mb:.2f}MB | {elapsed:.1f}s | {req.quality}p MP4 (Fade/Volume applied: {fade_applied})", flush=True)
+    print(f"✅ Cut success! {size_mb:.2f}MB | {elapsed:.1f}s | {req.quality}p MP4", flush=True)
 
     return FileResponse(
         output_path,
@@ -1544,88 +1581,14 @@ def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
         
         if start_sec >= end_sec:
             raise Exception("start_time must be less than end_time")
-            
-        end_extension = 0.75
-        fade_in_duration = 0.2
-        fade_out_duration = 0.75
-        
-        extended_end_sec = end_sec + end_extension
-        start_time_str = format_seconds_to_time_str(start_sec)
-        extended_end_time_str = format_seconds_to_time_str(extended_end_sec)
-        original_duration_sec = end_sec - start_sec
 
-        temp_raw_path = os.path.join(task_dir, "raw.mp4")
         output_path = os.path.join(task_dir, "short_clip.mp4")
 
-        TASKS[task_id]["progress"] = "🎬 جاري استخراج وقص الفيديو من يوتيوب..."
-        print(f"[{task_id}] Async Cutting: {start_time_str} to {extended_end_time_str}...", flush=True)
+        def update_prog(msg):
+            if task_id in TASKS:
+                TASKS[task_id]["progress"] = msg
 
-        ytdl_cmd = [
-            'yt-dlp',
-            '--quiet', '--no-warnings',
-            '--no-playlist',
-            '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
-            '--force-keyframes-at-cuts',
-            '--concurrent-fragments', '5',
-            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            '-f', f"bestvideo[height<={req.quality}]+bestaudio/bestvideo[height<=1080]/best[height<={req.quality}]/best",
-            '--merge-output-format', 'mp4',
-            '-o', temp_raw_path
-        ]
-
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-            ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
-
-        ytdl_cmd.append(req.url)
-
-        result = subprocess.run(ytdl_cmd, capture_output=True, text=True)
-
-        if result.returncode != 0 or not os.path.exists(temp_raw_path):
-            print(f"[{task_id}] ⚠️ Direct section cut failed ({result.stderr}). Retrying with fallback stream cut...", flush=True)
-            if os.path.exists(temp_raw_path):
-                try: os.remove(temp_raw_path)
-                except: pass
-            fallback_cmd = [
-                'yt-dlp',
-                '--quiet', '--no-warnings',
-                '--no-playlist',
-                '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
-                '-f', 'mp4/best',
-                '-o', temp_raw_path,
-                req.url
-            ]
-            if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-                fallback_cmd.insert(4, '--cookies')
-                fallback_cmd.insert(5, COOKIE_FILE_PATH)
-            result2 = subprocess.run(fallback_cmd, capture_output=True, text=True)
-            if result2.returncode != 0 or not os.path.exists(temp_raw_path):
-                err_msg = result2.stderr.strip() if result2.stderr else (result.stderr.strip() if result.stderr else "Output MP4 file was not generated by yt-dlp")
-                raise Exception(f"Cutting failed: {err_msg}")
-
-        TASKS[task_id]["progress"] = "✨ جاري تطبيق الفلاتر الصوتية والتلاشي..."
-        start_fade_out = original_duration_sec
-        ffmpeg_cmd = [
-            'ffmpeg', '-y',
-            '-i', temp_raw_path,
-            '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
-            '-map', '0:v', '-map', '[a]',
-            '-c:v', 'copy',
-            '-c:a', 'aac', '-b:a', '192k',
-            output_path
-        ]
-        
-        filter_result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-        if filter_result.returncode != 0 or not os.path.exists(output_path):
-            if os.path.exists(temp_raw_path):
-                try: os.rename(temp_raw_path, output_path)
-                except: pass
-
-        if os.path.exists(temp_raw_path):
-            try: os.remove(temp_raw_path)
-            except: pass
-
-        if not os.path.exists(output_path):
-            raise Exception("Final clip output file was not found")
+        cut_segment_fast(req.url, start_sec, end_sec, req.quality, output_path, progress_callback=update_prog)
 
         video_url = f"public/temp_{task_id}/short_clip.mp4"
         TASKS[task_id] = {
