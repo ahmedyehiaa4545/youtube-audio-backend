@@ -1375,8 +1375,9 @@ def get_cookie_header_from_file(cookie_file_path: str) -> str:
         print(f"Error parsing cookies file: {e}", flush=True)
     return "; ".join(cookies)
 
-def get_ffmpeg_headers(format_dict) -> str:
-    headers = format_dict.get('http_headers', {})
+def build_ffmpeg_http_headers(format_dict=None) -> str:
+    """Construct HTTP headers string for FFmpeg to access googlevideo streams directly"""
+    headers = format_dict.get('http_headers', {}) if format_dict else {}
     header_str = ""
     for k, v in headers.items():
         if k.lower() == 'referer':
@@ -1384,7 +1385,8 @@ def get_ffmpeg_headers(format_dict) -> str:
         header_str += f"{k}: {v}\r\n"
     
     # Enforce Referer header for googlevideo streams to bypass 403 Forbidden
-    header_str += "Referer: https://www.youtube.com/\r\n"
+    if "Referer:" not in header_str:
+        header_str += "Referer: https://www.youtube.com/\r\n"
     
     # Ensure User-Agent is present
     if "User-Agent" not in header_str and "user-agent" not in header_str.lower():
@@ -1396,6 +1398,9 @@ def get_ffmpeg_headers(format_dict) -> str:
         header_str += f"Cookie: {cookie_str}\r\n"
         
     return header_str
+
+def get_ffmpeg_headers(format_dict) -> str:
+    return build_ffmpeg_http_headers(format_dict)
 
 def format_seconds_to_time_str(seconds: float) -> str:
     """Format float seconds into HH:MM:SS.mmm format for precise clipping"""
@@ -1410,111 +1415,66 @@ def format_seconds_to_time_str(seconds: float) -> str:
 
 def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, output_path: str, progress_callback=None) -> str:
     """
-    محرك القص فائق السرعة (5-8 ثوانٍ فقط بدلاً من الدقائق):
-    1. استخراج الروابط المباشرة للبث (Direct Stream URLs) خلال ثانية إلى ثانيتين.
-    2. قص المقطع وتطبيق فلاتر التلاشي ومضاعفة الصوت مباشرة عبر FFmpeg عبر بروتوكول HTTP Range.
-    3. آلية احتياطية سريعة مع تحديد مهلة زمنية صارمة تمنع التعليق نهائياً.
+    محرك القص فائق السرعة (2 إلى 5 ثوانٍ فقط):
+    يستخدم عميل ios/android للتخطي المباشر وسحب المقطع المطلوب فقط وتشفيره فوراً.
     """
     if progress_callback:
-        progress_callback("⚡ جاري استخراج روابط البث المباشرة من يوتيوب...")
+        progress_callback("⚡ جاري استخراج وقص المقطع بالسرعة القصوى...")
 
     end_extension = 0.75
     fade_in_duration = 0.2
     fade_out_duration = 0.75
-    total_clip_duration = (end_sec - start_sec) + end_extension
     start_fade_out = end_sec - start_sec
-
-    # 1. المحاولة الأولى: القص المباشر فائق السرعة عبر روابط البث المباشرة (Direct Stream URLs)
-    stream_urls = []
-    try:
-        ytdl_url_cmd = [
-            'yt-dlp',
-            '--quiet', '--no-warnings', '--no-playlist',
-            '--socket-timeout', '10',
-            '-f', f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best",
-            '--get-url'
-        ]
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-            ytdl_url_cmd.extend(['--cookies', COOKIE_FILE_PATH])
-        ytdl_url_cmd.append(url)
-
-        res = subprocess.run(ytdl_url_cmd, capture_output=True, text=True, timeout=20)
-        if res.returncode == 0 and res.stdout.strip():
-            stream_urls = [line.strip() for line in res.stdout.strip().split('\n') if line.strip().startswith('http')]
-    except Exception as e:
-        print(f"⚠️ Direct get-url notice: {e}", flush=True)
-
-    if stream_urls:
-        if progress_callback:
-            progress_callback("🚀 جاري قص وحفظ المقطع بالسرعة القصوى عبر FFmpeg...")
-        
-        try:
-            http_hdrs = build_ffmpeg_http_headers()
-            if len(stream_urls) >= 2:
-                video_url, audio_url = stream_urls[0], stream_urls[1]
-                ffmpeg_cmd = [
-                    'ffmpeg', '-y',
-                    '-headers', http_hdrs,
-                    '-ss', str(start_sec),
-                    '-i', video_url,
-                    '-headers', http_hdrs,
-                    '-ss', str(start_sec),
-                    '-i', audio_url,
-                    '-t', str(total_clip_duration),
-                    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
-                    '-filter_complex', f"[1:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
-                    '-map', '0:v', '-map', '[a]',
-                    '-c:a', 'aac', '-b:a', '192k',
-                    output_path
-                ]
-            else:
-                single_url = stream_urls[0]
-                ffmpeg_cmd = [
-                    'ffmpeg', '-y',
-                    '-headers', http_hdrs,
-                    '-ss', str(start_sec),
-                    '-i', single_url,
-                    '-t', str(total_clip_duration),
-                    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
-                    '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
-                    '-map', '0:v', '-map', '[a]',
-                    '-c:a', 'aac', '-b:a', '192k',
-                    output_path
-                ]
-
-            ff_res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=60)
-            if ff_res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                print(f"🎉 Ultra-Fast Direct Stream Cut succeeded! ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
-                return output_path
-            else:
-                print(f"⚠️ FFmpeg direct stream cut warning: {ff_res.stderr[:200]}", flush=True)
-        except Exception as fe:
-            print(f"⚠️ FFmpeg stream cut exception: {fe}", flush=True)
-
-    # 2. المحاولة الثانية: التحميل والقص عبر yt-dlp الاحتياطي مع مهلة زمنية لمنع أي تعليق
-    if progress_callback:
-        progress_callback("🎬 جاري استخراج المقطع عبر محرك التنزيل الاحتياطي...")
 
     start_time_str = format_seconds_to_time_str(start_sec)
     extended_end_time_str = format_seconds_to_time_str(end_sec + end_extension)
     temp_raw = output_path + ".raw.mp4"
 
-    ytdl_sec_cmd = [
+    # 1. المحاولة الأساسية عبر عميل ios/android فائق السرعة
+    ytdl_cmd = [
         'yt-dlp',
-        '--quiet', '--no-warnings', '--no-playlist',
+        '--no-playlist',
         '--socket-timeout', '15',
+        '--extractor-args', 'youtube:player_client=ios,android',
         '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
         '--force-keyframes-at-cuts',
-        '-f', f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best",
+        '-f', f"best[height<={quality}]/bestvideo[height<={quality}]+bestaudio/best",
         '--merge-output-format', 'mp4',
-        '-o', temp_raw
+        '-o', temp_raw,
+        url
     ]
-    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-        ytdl_sec_cmd.extend(['--cookies', COOKIE_FILE_PATH])
-    ytdl_sec_cmd.append(url)
 
-    res_sec = subprocess.run(ytdl_sec_cmd, capture_output=True, text=True, timeout=90)
-    if res_sec.returncode == 0 and os.path.exists(temp_raw):
+    res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=75)
+    
+    # 2. المحاولة الاحتياطية مع ملف الكوكيز إذا تطلب الأمر
+    if res.returncode != 0 or not os.path.exists(temp_raw):
+        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+            ytdl_cmd_fallback = [
+                'yt-dlp',
+                '--no-playlist',
+                '--socket-timeout', '15',
+                '--cookies', COOKIE_FILE_PATH,
+                '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
+                '--force-keyframes-at-cuts',
+                '-f', f"best[height<={quality}]/bestvideo[height<={quality}]+bestaudio/best",
+                '--merge-output-format', 'mp4',
+                '-o', temp_raw,
+                url
+            ]
+            res = subprocess.run(ytdl_cmd_fallback, capture_output=True, text=True, timeout=75)
+
+    if not os.path.exists(temp_raw):
+        parent_dir = os.path.dirname(temp_raw)
+        base_name = os.path.basename(temp_raw)
+        for f in os.listdir(parent_dir):
+            if f.startswith(base_name) and os.path.getsize(os.path.join(parent_dir, f)) > 1000:
+                temp_raw = os.path.join(parent_dir, f)
+                break
+
+    if os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
+        if progress_callback:
+            progress_callback("✨ جاري تطبيق الفلاتر الصوتية والتلاشي...")
+        
         ff_post = [
             'ffmpeg', '-y',
             '-i', temp_raw,
@@ -1527,7 +1487,13 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
         subprocess.run(ff_post, capture_output=True, text=True, timeout=30)
         try: os.remove(temp_raw)
         except: pass
-        if os.path.exists(output_path):
+
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            print(f"🎉 Ultra-Fast Cut completed successfully! ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
+            return output_path
+        elif os.path.exists(temp_raw):
+            try: os.rename(temp_raw, output_path)
+            except: pass
             return output_path
 
     raise Exception("فشل استخراج المقطع من يوتيوب. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
