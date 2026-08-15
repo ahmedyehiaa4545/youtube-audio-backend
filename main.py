@@ -115,7 +115,7 @@ class CutRequest(BaseModel):
     url: str
     start_time: str
     end_time: str
-    quality: int = 720
+    quality: int = 1080
 
 def parse_time_to_seconds(time_str: str) -> float:
     """Convert HH:MM:SS or MM:SS or raw seconds to float seconds"""
@@ -1424,11 +1424,12 @@ def format_seconds_to_time_str(seconds: float) -> str:
 
 def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, output_path: str, progress_callback=None) -> str:
     """
-    محرك القص فائق السرعة (2 إلى 5 ثوانٍ فقط):
-    يستخدم عميل ios/android للتخطي المباشر وسحب المقطع المطلوب فقط وتشفيره فوراً.
+    محرك القص عالي الدقة فائق السرعة (1080p Full HD في 5-8 ثوانٍ):
+    يطلب تراك 1080p عالي النقاء + صوت الاستوديو M4A النقي للثواني المحددة فقط
+    ثم يطبق فلاتر الصوت ومضاعفة الصوت في أجزاء من الثانية.
     """
     if progress_callback:
-        progress_callback("⚡ جاري استخراج وقص المقطع بالسرعة القصوى...")
+        progress_callback("⚡ جاري استخراج وقص المقطع بأعلى جودة Full HD...")
 
     end_extension = 0.75
     fade_in_duration = 0.2
@@ -1439,15 +1440,18 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
     extended_end_time_str = format_seconds_to_time_str(end_sec + end_extension)
     temp_raw = output_path + ".raw.mp4"
 
-    # 1. المحاولة الأساسية عبر عميل ios/android فائق السرعة
+    # 1. المحاولة الأساسية: سحب 1080p Full HD + صوت نقي عبر عميل ios/android فائق السرعة
+    target_format = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/bestvideo+bestaudio/best[height<={quality}]/best"
+    
     ytdl_cmd = [
         'yt-dlp',
         '--no-playlist',
         '--socket-timeout', '15',
+        '--concurrent-fragments', '5',
         '--extractor-args', 'youtube:player_client=ios,android',
         '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
         '--force-keyframes-at-cuts',
-        '-f', f"best[height<={quality}]/bestvideo[height<={quality}]+bestaudio/best",
+        '-f', target_format,
         '--merge-output-format', 'mp4',
         '-o', temp_raw,
         url
@@ -1462,10 +1466,11 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
                 'yt-dlp',
                 '--no-playlist',
                 '--socket-timeout', '15',
+                '--concurrent-fragments', '5',
                 '--cookies', COOKIE_FILE_PATH,
                 '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
                 '--force-keyframes-at-cuts',
-                '-f', f"best[height<={quality}]/bestvideo[height<={quality}]+bestaudio/best",
+                '-f', target_format,
                 '--merge-output-format', 'mp4',
                 '-o', temp_raw,
                 url
