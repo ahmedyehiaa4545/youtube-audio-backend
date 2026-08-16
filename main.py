@@ -1424,12 +1424,12 @@ def format_seconds_to_time_str(seconds: float) -> str:
 
 def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, output_path: str, progress_callback=None) -> str:
     """
-    محرك القص عالي الدقة فائق السرعة (1080p Full HD في 5-8 ثوانٍ):
-    يطلب تراك 1080p عالي النقاء + صوت الاستوديو M4A النقي للثواني المحددة فقط
-    ثم يطبق فلاتر الصوت ومضاعفة الصوت في أجزاء من الثانية.
+    محرك القص عالي الدقة (1080p Full HD / 720p HD):
+    يضمن جلب تراك الفيديو فائق الدقة 1080p/720p مع صوت الاستوديو النقي M4A
+    ويمنع أي انخفاض صامت للجودة إلى 360p.
     """
     if progress_callback:
-        progress_callback("⚡ جاري استخراج وقص المقطع بأعلى جودة Full HD...")
+        progress_callback("💎 جاري استخراج وقص المقطع بجودة 1080p Full HD الأصلية...")
 
     end_extension = 0.75
     fade_in_duration = 0.2
@@ -1440,42 +1440,45 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
     extended_end_time_str = format_seconds_to_time_str(end_sec + end_extension)
     temp_raw = output_path + ".raw.mp4"
 
-    # 1. المحاولة الأساسية: سحب 1080p Full HD + صوت نقي عبر عميل ios/android فائق السرعة
-    target_format = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/bestvideo+bestaudio/best[height<={quality}]/best"
-    
+    # صيغة إجبارية لجلب 1080p/720p عالية النقاء ومنع الهبوط لـ 360p نهائياً
+    target_format = f"bestvideo[height<={quality}]+bestaudio/bestvideo[height<=1080]+bestaudio/bestvideo[height<=720]+bestaudio/best[height>=720]"
+
+    # 1. المحاولة الأساسية: سحب 1080p Full HD عبر عميل android_vr,web
     ytdl_cmd = [
         'yt-dlp',
         '--no-playlist',
-        '--socket-timeout', '15',
+        '--socket-timeout', '30',
         '--concurrent-fragments', '5',
-        '--extractor-args', 'youtube:player_client=ios,android',
+        '--extractor-args', 'youtube:player_client=android_vr,web',
         '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
         '--force-keyframes-at-cuts',
         '-f', target_format,
         '--merge-output-format', 'mp4',
-        '-o', temp_raw,
-        url
+        '-o', temp_raw
     ]
+    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+        ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
+    ytdl_cmd.append(url)
 
-    res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=75)
+    res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=120)
     
-    # 2. المحاولة الاحتياطية مع ملف الكوكيز إذا تطلب الأمر
+    # 2. المحاولة الاحتياطية بدون كوكيز إذا تطلب الأمر
     if res.returncode != 0 or not os.path.exists(temp_raw):
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-            ytdl_cmd_fallback = [
-                'yt-dlp',
-                '--no-playlist',
-                '--socket-timeout', '15',
-                '--concurrent-fragments', '5',
-                '--cookies', COOKIE_FILE_PATH,
-                '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
-                '--force-keyframes-at-cuts',
-                '-f', target_format,
-                '--merge-output-format', 'mp4',
-                '-o', temp_raw,
-                url
-            ]
-            res = subprocess.run(ytdl_cmd_fallback, capture_output=True, text=True, timeout=75)
+        if progress_callback:
+            progress_callback("🚀 جاري محاولة سحب 1080p عبر محرك البث الاحتياطي...")
+        ytdl_cmd_fallback = [
+            'yt-dlp',
+            '--no-playlist',
+            '--socket-timeout', '30',
+            '--concurrent-fragments', '5',
+            '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
+            '--force-keyframes-at-cuts',
+            '-f', target_format,
+            '--merge-output-format', 'mp4',
+            '-o', temp_raw,
+            url
+        ]
+        res = subprocess.run(ytdl_cmd_fallback, capture_output=True, text=True, timeout=120)
 
     if not os.path.exists(temp_raw):
         parent_dir = os.path.dirname(temp_raw)
@@ -1487,7 +1490,7 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
 
     if os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
         if progress_callback:
-            progress_callback("✨ جاري تطبيق الفلاتر الصوتية والتلاشي...")
+            progress_callback("✨ جاري تطبيق الفلاتر الصوتية والتلاشي بجودة 1080p...")
         
         ff_post = [
             'ffmpeg', '-y',
@@ -1498,19 +1501,19 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             '-c:a', 'aac', '-b:a', '192k',
             output_path
         ]
-        subprocess.run(ff_post, capture_output=True, text=True, timeout=30)
+        subprocess.run(ff_post, capture_output=True, text=True, timeout=45)
         try: os.remove(temp_raw)
         except: pass
 
         if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            print(f"🎉 Ultra-Fast Cut completed successfully! ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
+            print(f"🎉 1080p High-Quality Cut completed successfully! ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
             return output_path
         elif os.path.exists(temp_raw):
             try: os.rename(temp_raw, output_path)
             except: pass
             return output_path
 
-    raise Exception("فشل استخراج المقطع من يوتيوب. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
+    raise Exception("فشل استخراج المقطع بجودة 1080p. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
 
 
 @app.post("/api/cut")
