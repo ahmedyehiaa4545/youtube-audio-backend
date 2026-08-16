@@ -1425,32 +1425,37 @@ def format_seconds_to_time_str(seconds: float) -> str:
 def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, output_path: str, progress_callback=None) -> str:
     """
     محرك القص الذكي ثلاثي المراحل (3-Tier Robust Cut Engine):
-    1. محاولة السحب بأعلى جودة (1080p/720p HD) عبر الكوكيز والاتصال المتوازي (مهلة 40 ثانية).
-    2. محاولة السحب عالية الجودة عبر عميل ios/android (مهلة 35 ثانية).
-    3. محرك الإنقاذ فائق السرعة عبر البث المباشر (Single-Stream Fast Seek) الذي يضمن إتمام القص في 3 ثوانٍ دون أي تعليق أو أخطاء.
+    1. محاولة السحب بأعلى جودة (1080p/720p HD) عبر الكوكيز والاتصال المتوازي مع مهلة ديناميكية.
+    2. محرك الإنقاذ فائق السرعة مع الكوكيز والبث المباشر (Single-Stream Fast Direct Extraction).
+    3. المحرك النهائي البديل مع الكوكيز.
     """
     if progress_callback:
         progress_callback("💎 جاري استخراج وقص المقطع بأعلى دقة متاحة...")
 
+    clip_len = max(1.0, end_sec - start_sec)
     end_extension = 0.75
     fade_in_duration = 0.2
     fade_out_duration = 0.75
-    start_fade_out = end_sec - start_sec
+    start_fade_out = clip_len
 
     start_time_str = format_seconds_to_time_str(start_sec)
     extended_end_time_str = format_seconds_to_time_str(end_sec + end_extension)
     temp_raw = output_path + ".raw.mp4"
 
-    target_format_hd = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
-    target_format_fast = f"best[height<={quality}]/bestvideo[height<={quality}]+bestaudio/best"
+    timeout_tier1 = max(75, int(clip_len * 1.8))
+    timeout_rescue = max(50, int(clip_len * 1.2))
 
-    # 1. المرحلة الأولى: محاولة السحب عالي الدقة 1080p/720p مع الكوكيز
+    target_format_hd = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
+    target_format_fast = f"best[height<={quality}]/best[height<=720]/bestvideo[height<={quality}]+bestaudio/best"
+
     download_success = False
+
+    # 1. المرحلة الأولى: محاولة السحب عالي الدقة 1080p/720p مع الكوكيز و 5 قنوات متوازية
     try:
         ytdl_cmd = [
             'yt-dlp',
             '--no-playlist',
-            '--socket-timeout', '15',
+            '--socket-timeout', '20',
             '--concurrent-fragments', '5',
             '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
             '--force-keyframes-at-cuts',
@@ -1462,37 +1467,13 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
         ytdl_cmd.append(url)
 
-        res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=40)
+        res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=timeout_tier1)
         if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
             download_success = True
     except Exception as e1:
-        print(f"⚠️ Tier 1 HD cut notice: {e1}", flush=True)
+        print(f"⚠️ Tier 1 HD cut notice ({timeout_tier1}s): {e1}", flush=True)
 
-    # 2. المرحلة الثانية: المحاولة عبر عميل ios/android
-    if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
-        if progress_callback:
-            progress_callback("🚀 جاري محاولة السحب عبر المحرك الاحتياطي...")
-        try:
-            ytdl_cmd_fallback = [
-                'yt-dlp',
-                '--no-playlist',
-                '--socket-timeout', '15',
-                '--concurrent-fragments', '5',
-                '--extractor-args', 'youtube:player_client=ios,android',
-                '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
-                '--force-keyframes-at-cuts',
-                '-f', target_format_hd,
-                '--merge-output-format', 'mp4',
-                '-o', temp_raw,
-                url
-            ]
-            res = subprocess.run(ytdl_cmd_fallback, capture_output=True, text=True, timeout=35)
-            if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
-                download_success = True
-        except Exception as e2:
-            print(f"⚠️ Tier 2 cut notice: {e2}", flush=True)
-
-    # 3. المرحلة الثالثة (محرك الإنقاذ الفوري): القص المباشر السريع لتفادي أي تعليق
+    # 2. المرحلة الثانية (محرك الإنقاذ فائق السرعة مع الكوكيز):
     if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
         if progress_callback:
             progress_callback("⚡ جاري استخراج المقطع عبر محرك البث الفوري...")
@@ -1500,19 +1481,91 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             ytdl_cmd_rescue = [
                 'yt-dlp',
                 '--no-playlist',
-                '--socket-timeout', '15',
+                '--socket-timeout', '20',
+                '--concurrent-fragments', '5',
                 '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
                 '--force-keyframes-at-cuts',
                 '-f', target_format_fast,
                 '--merge-output-format', 'mp4',
-                '-o', temp_raw,
-                url
+                '-o', temp_raw
             ]
-            res = subprocess.run(ytdl_cmd_rescue, capture_output=True, text=True, timeout=30)
+            if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+                ytdl_cmd_rescue.extend(['--cookies', COOKIE_FILE_PATH])
+            ytdl_cmd_rescue.append(url)
+
+            res = subprocess.run(ytdl_cmd_rescue, capture_output=True, text=True, timeout=timeout_rescue)
+            if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
+                download_success = True
+        except Exception as e2:
+            print(f"⚠️ Tier 2 rescue cut notice ({timeout_rescue}s): {e2}", flush=True)
+
+    # 3. المرحلة الثالثة: المحاولة الاحتياطية
+    if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
+        if progress_callback:
+            progress_callback("🚀 جاري محاولة السحب عبر المحرك الاحتياطي...")
+        try:
+            ytdl_cmd_fallback = [
+                'yt-dlp',
+                '--no-playlist',
+                '--socket-timeout', '20',
+                '--concurrent-fragments', '5',
+                '--extractor-args', 'youtube:player_client=ios,android',
+                '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
+                '--force-keyframes-at-cuts',
+                '-f', 'best',
+                '--merge-output-format', 'mp4',
+                '-o', temp_raw
+            ]
+            if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+                ytdl_cmd_fallback.extend(['--cookies', COOKIE_FILE_PATH])
+            ytdl_cmd_fallback.append(url)
+
+            res = subprocess.run(ytdl_cmd_fallback, capture_output=True, text=True, timeout=timeout_rescue)
             if os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
                 download_success = True
         except Exception as e3:
-            print(f"⚠️ Tier 3 rescue cut notice: {e3}", flush=True)
+            print(f"⚠️ Tier 3 cut notice: {e3}", flush=True)
+
+    # التحقق من وجود الملف المؤقت أو الملفات الجزئية
+    if not os.path.exists(temp_raw):
+        parent_dir = os.path.dirname(temp_raw)
+        base_name = os.path.basename(temp_raw)
+        for f in os.listdir(parent_dir):
+            if f.startswith(base_name) and os.path.getsize(os.path.join(parent_dir, f)) > 1000:
+                temp_raw = os.path.join(parent_dir, f)
+                download_success = True
+                break
+
+    if os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
+        if progress_callback:
+            progress_callback("✨ جاري تطبيق الفلاتر الصوتية والتلاشي...")
+
+        ff_post = [
+            'ffmpeg', '-y',
+            '-i', temp_raw,
+            '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
+            '-map', '0:v', '-map', '[a]',
+            '-c:v', 'copy',
+            '-c:a', 'aac', '-b:a', '192k',
+            output_path
+        ]
+        try:
+            subprocess.run(ff_post, capture_output=True, text=True, timeout=40)
+        except Exception as ffe:
+            print(f"⚠️ FFmpeg post-processing notice: {ffe}", flush=True)
+            
+        try: os.remove(temp_raw)
+        except: pass
+
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            print(f"🎉 Cut completed successfully! ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
+            return output_path
+        elif os.path.exists(temp_raw):
+            try: os.rename(temp_raw, output_path)
+            except: pass
+            return output_path
+
+    raise Exception("فشل استخراج المقطع من يوتيوب. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
 
     # التحقق من وجود الملف المؤقت أو الملفات الجزئية
     if not os.path.exists(temp_raw):
