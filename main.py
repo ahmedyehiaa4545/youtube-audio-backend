@@ -374,196 +374,65 @@ def extract_video_id(url: str) -> str | None:
     match = re.search(pattern, url)
     return match.group(1) if match else None
 
-def download_audio_via_rapidapi(youtube_url: str, output_path: str, task_id: str = None) -> str:
-    video_id = extract_video_id(youtube_url)
-    if not video_id:
-        raise Exception("رابط الفيديو غير صالح!")
-
-    def update_task(msg):
-        if task_id and task_id in TASKS:
-            TASKS[task_id]["progress"] = msg
-
-    RAPID_API_KEY = os.environ.get("RAPID_API_KEY", "78aaeed1d3mshdc777f49020e221p1803c4jsn35138c026a86")
-
-    headers = {
-        'x-rapidapi-host': 'youtube-mp4-mp3-downloader.p.rapidapi.com',
-        'x-rapidapi-key': RAPID_API_KEY,
-        'Content-Type': 'application/json'
-    }
-
-    update_task("⚡ جاري تحميل ملف الصوت المباشر...")
-    print(f"[*] Sending download request to RapidAPI for video ID: {video_id}...", flush=True)
-    api_url = "https://youtube-mp4-mp3-downloader.p.rapidapi.com/api/v1/download"
-    params = {
-        'format': 'mp3',
-        'id': video_id,
-        'audioQuality': '128',
-        'addInfo': 'false',
-        'allowExtendedDuration': 'true'
-    }
-
-    response = requests.get(api_url, headers=headers, params=params, timeout=15)
-    if response.status_code != 200:
-        raise Exception(f"Failed to start conversion. Status code: {response.status_code}. Detail: {response.text}")
-    
-    res_data = response.json()
-    rapid_task_id = res_data.get('progressId') or res_data.get('id')
-    if not rapid_task_id:
-        raise Exception(f"Task ID not found in response: {res_data}")
-
-    print(f"[+] RapidAPI Conversion started. Task ID: {rapid_task_id}", flush=True)
-
-    progress_url = "https://youtube-mp4-mp3-downloader.p.rapidapi.com/api/v1/progress"
-    download_url = None
-    max_retries = 25  # 25 * 3s = 75 seconds max timeout
-    
-    for attempt in range(max_retries):
-        prog_percent = min(90, int(((attempt + 1) / max_retries) * 100))
-        update_task(f"🌐 جارٍ تجهيز وتحميل ملف الصوت عبر السيرفر ({prog_percent}%)...")
-        print(f"[*] Checking conversion progress... (attempt {attempt + 1}/{max_retries})", flush=True)
-        
-        try:
-            progress_res = requests.get(progress_url, headers=headers, params={'id': rapid_task_id}, timeout=10)
-            if progress_res.status_code == 200:
-                progress_data = progress_res.json()
-                if progress_data.get('finished') is True or progress_data.get('status') == 'Finished':
-                    download_url = progress_data.get('downloadUrl')
-                    print(f"🎉 Conversion finished on RapidAPI server!", flush=True)
-                    break
-                elif progress_data.get('status') in ['Failed', 'Error']:
-                    raise Exception(f"Conversion failed on RapidAPI server: {progress_data}")
-        except Exception as pe:
-            print(f"⚠️ RapidAPI progress check warning: {pe}", flush=True)
-
-        time.sleep(3)
-
-    if not download_url:
-        raise Exception("استغرق خادم التحويل وقتاً طويلاً. يرجى المحاولة مرة أخرى أو استخدام فيديو أقصر.")
-
-    update_task("⚡ جاري تنزيل ملف الصوت...")
-    print("[*] Downloading MP3 file from RapidAPI...", flush=True)
-    
-    # Safe chunked download with timeout
-    audio_res = requests.get(download_url, stream=True, timeout=20)
-    if audio_res.status_code != 200:
-        raise Exception(f"Failed to download audio file. Status: {audio_res.status_code}")
-        
-    with open(output_path, 'wb') as f:
-        for chunk in audio_res.iter_content(chunk_size=512*1024):
-            if chunk:
-                f.write(chunk)
-                
-    if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-        print("[+] Audio downloaded and saved successfully via RapidAPI.", flush=True)
-        return output_path
-    raise Exception("فشل تنزيل ملف الصوت عبر خادم RapidAPI.")
-
 def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None) -> str:
     """
-    محرك استخراج الصوت الذكي متعدد القنوات (Multi-Tier Smart Audio Downloader):
-    1. محاولة السحب المباشر السريع عبر yt-dlp مع الكوكيز (40 ثانية).
-    2. محاولة السحب عبر عميل android,web لتفادي قيود يوتيوب (40 ثانية).
-    3. محرك الإنقاذ الاحتياطي عبر RapidAPI مع حماية تامة من التعليق.
+    تحميل الصوت مباشرة وسريعاً من يوتيوب عبر yt-dlp وملف الكوكيز (الأسلوب الأساسي 100%)
     """
     def update_task(msg):
         if task_id and task_id in TASKS:
             TASKS[task_id]["progress"] = msg
 
-    update_task("⚡ جاري استخراج الملف الصوتي بنجاح...")
-    print(f"⚡ Attempting fast direct audio extraction for {youtube_url}...", flush=True)
+    update_task("⚡ جاري استخراج وتحميل الصوت من يوتيوب...")
+    print(f"⚡ Downloading audio directly via yt-dlp for {youtube_url}...", flush=True)
 
     raw_temp_audio = output_path + ".raw"
 
-    # 1. المحاولة الأولى: السحب المباشر السريع مع الكوكيز
-    try:
-        ytdl_cmd1 = [
-            'yt-dlp',
-            '--quiet', '--no-warnings',
-            '--no-playlist',
-            '--socket-timeout', '15',
-            '--concurrent-fragments', '5',
-            '-f', 'ba[ext=m4a]/ba[ext=mp3]/ba/b',
-            '-o', raw_temp_audio
+    # المحاولة الأساسية المباشرة عبر yt-dlp مع ملف الكوكيز
+    ytdl_cmd = [
+        'yt-dlp',
+        '--no-playlist',
+        '--socket-timeout', '30',
+        '--concurrent-fragments', '5',
+        '-f', 'bestaudio[ext=m4a]/bestaudio/best',
+        '-o', raw_temp_audio
+    ]
+    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+        ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
+    ytdl_cmd.append(youtube_url)
+
+    res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=120)
+
+    downloaded_file = None
+    if os.path.exists(raw_temp_audio) and os.path.getsize(raw_temp_audio) > 1000:
+        downloaded_file = raw_temp_audio
+    else:
+        parent_dir = os.path.dirname(raw_temp_audio)
+        base_name = os.path.basename(raw_temp_audio)
+        for f in os.listdir(parent_dir):
+            if f.startswith(base_name) and os.path.getsize(os.path.join(parent_dir, f)) > 1000:
+                downloaded_file = os.path.join(parent_dir, f)
+                break
+
+    if downloaded_file and os.path.exists(downloaded_file) and os.path.getsize(downloaded_file) > 1000:
+        update_task("⚡ جاري تحويل وتجهيز ملف الصوت MP3...")
+        print(f"🚀 Audio downloaded ({os.path.getsize(downloaded_file)} bytes). Converting to MP3 via ffmpeg...", flush=True)
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-i', downloaded_file,
+            '-ar', '44100',
+            '-b:a', '192k',
+            output_path
         ]
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-            ytdl_cmd1.extend(['--cookies', COOKIE_FILE_PATH])
-        ytdl_cmd1.append(youtube_url)
+        ff_res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=60)
+        try: os.remove(downloaded_file)
+        except: pass
 
-        res = subprocess.run(ytdl_cmd1, capture_output=True, text=True, timeout=50)
-        
-        downloaded_file = None
-        if os.path.exists(raw_temp_audio) and os.path.getsize(raw_temp_audio) > 1000:
-            downloaded_file = raw_temp_audio
-        else:
-            parent_dir = os.path.dirname(raw_temp_audio)
-            base_name = os.path.basename(raw_temp_audio)
-            for f in os.listdir(parent_dir):
-                if f.startswith(base_name) and os.path.getsize(os.path.join(parent_dir, f)) > 1000:
-                    downloaded_file = os.path.join(parent_dir, f)
-                    break
+        if ff_res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            print("🎉 Audio extraction and conversion succeeded!", flush=True)
+            return output_path
 
-        if downloaded_file:
-            update_task("⚡ جاري معالجة وتجهيز الصوت...")
-            print(f"🚀 Audio stream downloaded ({os.path.getsize(downloaded_file)} bytes). Fast converting to MP3 via ffmpeg...", flush=True)
-            ffmpeg_cmd = ['ffmpeg', '-y', '-i', downloaded_file, '-ar', '44100', '-b:a', '192k', output_path]
-            ff_res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=40)
-            try: os.remove(downloaded_file)
-            except: pass
-
-            if ff_res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                print("🎉 Direct audio extraction succeeded (Tier 1)!", flush=True)
-                return output_path
-    except Exception as e1:
-        print(f"⚠️ Tier 1 audio extraction notice: {e1}", flush=True)
-
-    # 2. المحاولة الثانية: السحب عبر عميل android,web (يحل مشكلة The page needs to be reloaded)
-    try:
-        update_task("🚀 جاري محاولة سحب الصوت عبر القناة البديلة...")
-        print(f"⚡ Attempting android,web client audio extraction for {youtube_url}...", flush=True)
-        ytdl_cmd2 = [
-            'yt-dlp',
-            '--quiet', '--no-warnings',
-            '--no-playlist',
-            '--socket-timeout', '15',
-            '--concurrent-fragments', '5',
-            '--extractor-args', 'youtube:player_client=android,web',
-            '-f', 'ba/b',
-            '-o', raw_temp_audio
-        ]
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-            ytdl_cmd2.extend(['--cookies', COOKIE_FILE_PATH])
-        ytdl_cmd2.append(youtube_url)
-
-        res2 = subprocess.run(ytdl_cmd2, capture_output=True, text=True, timeout=50)
-
-        downloaded_file2 = None
-        if os.path.exists(raw_temp_audio) and os.path.getsize(raw_temp_audio) > 1000:
-            downloaded_file2 = raw_temp_audio
-        else:
-            parent_dir = os.path.dirname(raw_temp_audio)
-            base_name = os.path.basename(raw_temp_audio)
-            for f in os.listdir(parent_dir):
-                if f.startswith(base_name) and os.path.getsize(os.path.join(parent_dir, f)) > 1000:
-                    downloaded_file2 = os.path.join(parent_dir, f)
-                    break
-
-        if downloaded_file2:
-            update_task("⚡ جاري معالجة وتجهيز الصوت...")
-            print(f"🚀 Audio stream downloaded ({os.path.getsize(downloaded_file2)} bytes). Fast converting to MP3 via ffmpeg...", flush=True)
-            ffmpeg_cmd = ['ffmpeg', '-y', '-i', downloaded_file2, '-ar', '44100', '-b:a', '192k', output_path]
-            ff_res2 = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=40)
-            try: os.remove(downloaded_file2)
-            except: pass
-
-            if ff_res2.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                print("🎉 Direct audio extraction succeeded (Tier 2 android/web)!", flush=True)
-                return output_path
-    except Exception as e2:
-        print(f"⚠️ Tier 2 audio extraction notice: {e2}", flush=True)
-
-    # 3. المحاولة الثالثة: الإنقاذ عبر RapidAPI
-    update_task("🌐 جاري استخراج الصوت عبر خادم الإنقاذ...")
-    return download_audio_via_rapidapi(youtube_url, output_path, task_id)
+    err_details = res.stderr.strip() if res.stderr else "لم يتم العثور على ملف الصوت"
+    raise Exception(f"فشل استخراج الصوت من يوتيوب عبر yt-dlp: {err_details[:150]}")
 
 # دالة لضبط التوقيتات برمجياً (رياضياً)
 def adjust_timestamps(text: str, offset_minutes: int) -> str:
