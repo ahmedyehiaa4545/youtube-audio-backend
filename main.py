@@ -376,8 +376,10 @@ def extract_video_id(url: str) -> str | None:
 
 def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None) -> str:
     """
-    تحميل الصوت مباشرة وسريعاً من يوتيوب عبر yt-dlp وملف الكوكيز (الأسلوب الأساسي 100%)
+    تحميل الصوت مباشرة وسريعاً من يوتيوب عبر مكتبة yt_dlp الأصلية مع عملاء البث المعتمدين والكوكيز
     """
+    import yt_dlp
+
     def update_task(msg):
         if task_id and task_id in TASKS:
             TASKS[task_id]["progress"] = msg
@@ -385,54 +387,51 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
     update_task("⚡ جاري استخراج وتحميل الصوت من يوتيوب...")
     print(f"⚡ Downloading audio directly via yt-dlp for {youtube_url}...", flush=True)
 
-    raw_temp_audio = output_path + ".raw"
+    output_base = output_path.replace(".mp3", "")
 
-    # المحاولة الأساسية المباشرة عبر yt-dlp مع ملف الكوكيز
-    ytdl_cmd = [
-        'yt-dlp',
-        '--no-playlist',
-        '--socket-timeout', '30',
-        '--concurrent-fragments', '5',
-        '-f', 'bestaudio[ext=m4a]/bestaudio/best',
-        '-o', raw_temp_audio
-    ]
+    # إعدادات السحب الأصلية المعززة بعملاء البث والكوكيز
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": output_base,
+        "extractor_args": {"youtube": {"player_client": ["android_vr", "ios", "mweb", "android"]}},
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }],
+        "quiet": True,
+        "noprogress": True,
+        "socket_timeout": 30,
+        "concurrent_fragment_downloads": 5,
+    }
+
     if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-        ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
-    ytdl_cmd.append(youtube_url)
+        opts["cookiefile"] = COOKIE_FILE_PATH
 
-    res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=120)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([youtube_url])
+    except Exception as ydl_err:
+        print(f"⚠️ Primary yt_dlp download notice: {ydl_err}", flush=True)
 
-    downloaded_file = None
-    if os.path.exists(raw_temp_audio) and os.path.getsize(raw_temp_audio) > 1000:
-        downloaded_file = raw_temp_audio
-    else:
-        parent_dir = os.path.dirname(raw_temp_audio)
-        base_name = os.path.basename(raw_temp_audio)
-        for f in os.listdir(parent_dir):
-            if f.startswith(base_name) and os.path.getsize(os.path.join(parent_dir, f)) > 1000:
-                downloaded_file = os.path.join(parent_dir, f)
-                break
+    # التحقق من وجود ملف الـ MP3 الناتج
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+        print(f"🎉 Audio extracted successfully: {output_path} ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
+        return output_path
 
-    if downloaded_file and os.path.exists(downloaded_file) and os.path.getsize(downloaded_file) > 1000:
-        update_task("⚡ جاري تحويل وتجهيز ملف الصوت MP3...")
-        print(f"🚀 Audio downloaded ({os.path.getsize(downloaded_file)} bytes). Converting to MP3 via ffmpeg...", flush=True)
-        ffmpeg_cmd = [
-            'ffmpeg', '-y',
-            '-i', downloaded_file,
-            '-ar', '44100',
-            '-b:a', '192k',
-            output_path
-        ]
-        ff_res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=60)
-        try: os.remove(downloaded_file)
-        except: pass
-
-        if ff_res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            print("🎉 Audio extraction and conversion succeeded!", flush=True)
+    # البحث عن أي ملف صوتي تم إنشاؤه في المجلد
+    parent_dir = os.path.dirname(output_path)
+    base_name = os.path.basename(output_base)
+    for f in os.listdir(parent_dir):
+        if f.startswith(base_name) and f.endswith(".mp3") and os.path.getsize(os.path.join(parent_dir, f)) > 1000:
+            found_path = os.path.join(parent_dir, f)
+            if found_path != output_path:
+                try: os.rename(found_path, output_path)
+                except: pass
+            print(f"🎉 Audio extracted successfully: {output_path}", flush=True)
             return output_path
 
-    err_details = res.stderr.strip() if res.stderr else "لم يتم العثور على ملف الصوت"
-    raise Exception(f"فشل استخراج الصوت من يوتيوب عبر yt-dlp: {err_details[:150]}")
+    raise Exception("فشل استخراج ملف الصوت من يوتيوب. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
 
 # دالة لضبط التوقيتات برمجياً (رياضياً)
 def adjust_timestamps(text: str, offset_minutes: int) -> str:
