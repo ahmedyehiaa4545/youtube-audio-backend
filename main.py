@@ -1352,21 +1352,24 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
     extended_end_time_str = format_seconds_to_time_str(end_sec + end_extension)
     temp_raw = output_path + ".raw.mp4"
 
-    timeout_tier1 = max(75, int(clip_len * 1.8))
-    timeout_rescue = max(50, int(clip_len * 1.2))
+    # Dynamic timeout: adds buffer for seeking deep in long videos (over 30 min)
+    seeking_buffer = 45 if start_sec > 1800 else 0
+    timeout_tier1 = max(120, int(clip_len * 2.5) + seeking_buffer)
+    timeout_rescue = max(75, int(clip_len * 1.5) + (20 if start_sec > 1800 else 0))
 
     target_format_hd = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
     target_format_fast = f"best[height<={quality}]/best[height<=720]/bestvideo[height<={quality}]+bestaudio/best"
 
     download_success = False
 
-    # 1. المرحلة الأولى: محاولة السحب عالي الدقة 1080p/720p مع الكوكيز و 5 قنوات متوازية
+    # 1. المرحلة الأولى: محاولة السحب عالي الدقة 1080p/720p مع الكوكيز وتجاوز خنق السرعة
     try:
         ytdl_cmd = [
             'yt-dlp',
             '--no-playlist',
-            '--socket-timeout', '20',
+            '--socket-timeout', '30',
             '--concurrent-fragments', '5',
+            '--extractor-args', 'youtube:player_client=android,web',
             '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
             '--force-keyframes-at-cuts',
             '-f', target_format_hd,
@@ -1383,7 +1386,7 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
     except Exception as e1:
         print(f"⚠️ Tier 1 HD cut notice ({timeout_tier1}s): {e1}", flush=True)
 
-    # 2. المرحلة الثانية (محرك الإنقاذ فائق السرعة مع الكوكيز):
+    # 2. المرحلة الثانية (محرك الإنقاذ فائق السرعة مع الكوكيز وتجاوز الخنق):
     if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
         if progress_callback:
             progress_callback("⚡ جاري استخراج المقطع عبر محرك البث الفوري...")
@@ -1391,8 +1394,9 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             ytdl_cmd_rescue = [
                 'yt-dlp',
                 '--no-playlist',
-                '--socket-timeout', '20',
+                '--socket-timeout', '30',
                 '--concurrent-fragments', '5',
+                '--extractor-args', 'youtube:player_client=android,web',
                 '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
                 '--force-keyframes-at-cuts',
                 '-f', target_format_fast,
@@ -1417,7 +1421,7 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             ytdl_cmd_fallback = [
                 'yt-dlp',
                 '--no-playlist',
-                '--socket-timeout', '20',
+                '--socket-timeout', '30',
                 '--concurrent-fragments', '5',
                 '--extractor-args', 'youtube:player_client=ios,android',
                 '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
