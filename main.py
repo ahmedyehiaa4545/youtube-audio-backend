@@ -1383,8 +1383,11 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
         res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=timeout_tier1)
         if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
             download_success = True
+        else:
+            err_msg = res.stderr.strip()[:200] if res.stderr else "Unknown error"
+            print(f"⚠️ Tier 1 HD notice (code {res.returncode}): {err_msg}", flush=True)
     except Exception as e1:
-        print(f"⚠️ Tier 1 HD cut notice ({timeout_tier1}s): {e1}", flush=True)
+        print(f"⚠️ Tier 1 HD cut exception ({timeout_tier1}s): {e1}", flush=True)
 
     # 2. المرحلة الثانية (محرك الإنقاذ فائق السرعة مع الكوكيز وتجاوز الخنق):
     if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
@@ -1410,8 +1413,11 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             res = subprocess.run(ytdl_cmd_rescue, capture_output=True, text=True, timeout=timeout_rescue)
             if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
                 download_success = True
+            else:
+                err_msg = res.stderr.strip()[:200] if res.stderr else "Unknown error"
+                print(f"⚠️ Tier 2 rescue notice (code {res.returncode}): {err_msg}", flush=True)
         except Exception as e2:
-            print(f"⚠️ Tier 2 rescue cut notice ({timeout_rescue}s): {e2}", flush=True)
+            print(f"⚠️ Tier 2 rescue cut exception ({timeout_rescue}s): {e2}", flush=True)
 
     # 3. المرحلة الثالثة: المحاولة الاحتياطية
     if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
@@ -1435,10 +1441,13 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             ytdl_cmd_fallback.append(url)
 
             res = subprocess.run(ytdl_cmd_fallback, capture_output=True, text=True, timeout=timeout_rescue)
-            if os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
+            if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
                 download_success = True
+            else:
+                err_msg = res.stderr.strip()[:200] if res.stderr else "Unknown error"
+                print(f"⚠️ Tier 3 fallback notice (code {res.returncode}): {err_msg}", flush=True)
         except Exception as e3:
-            print(f"⚠️ Tier 3 cut notice: {e3}", flush=True)
+            print(f"⚠️ Tier 3 cut exception: {e3}", flush=True)
 
     # التحقق من وجود الملف المؤقت أو الملفات الجزئية
     if not os.path.exists(temp_raw):
@@ -1465,47 +1474,6 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
         ]
         try:
             subprocess.run(ff_post, capture_output=True, text=True, timeout=40)
-        except Exception as ffe:
-            print(f"⚠️ FFmpeg post-processing notice: {ffe}", flush=True)
-            
-        try: os.remove(temp_raw)
-        except: pass
-
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            print(f"🎉 Cut completed successfully! ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
-            return output_path
-        elif os.path.exists(temp_raw):
-            try: os.rename(temp_raw, output_path)
-            except: pass
-            return output_path
-
-    raise Exception("فشل استخراج المقطع من يوتيوب. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
-
-    # التحقق من وجود الملف المؤقت أو الملفات الجزئية
-    if not os.path.exists(temp_raw):
-        parent_dir = os.path.dirname(temp_raw)
-        base_name = os.path.basename(temp_raw)
-        for f in os.listdir(parent_dir):
-            if f.startswith(base_name) and os.path.getsize(os.path.join(parent_dir, f)) > 1000:
-                temp_raw = os.path.join(parent_dir, f)
-                download_success = True
-                break
-
-    if os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
-        if progress_callback:
-            progress_callback("✨ جاري تطبيق الفلاتر الصوتية والتلاشي...")
-
-        ff_post = [
-            'ffmpeg', '-y',
-            '-i', temp_raw,
-            '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
-            '-map', '0:v', '-map', '[a]',
-            '-c:v', 'copy',
-            '-c:a', 'aac', '-b:a', '192k',
-            output_path
-        ]
-        try:
-            subprocess.run(ff_post, capture_output=True, text=True, timeout=30)
         except Exception as ffe:
             print(f"⚠️ FFmpeg post-processing notice: {ffe}", flush=True)
             
