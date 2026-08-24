@@ -49,18 +49,28 @@ def init_cookies():
             with open(COOKIE_FILE_PATH, "w", encoding="utf-8") as f:
                 f.write(cookies_env.strip())
             print("🔑 cookies.txt written from YOUTUBE_COOKIES env variable.", flush=True)
+            return
         except Exception as e:
             print(f"⚠️ Failed to write cookies from env: {e}", flush=True)
-    else:
-        # Fallback to local cookies.txt in project root
-        if os.path.exists("cookies.txt"):
+
+    # Check local cookies.txt from repo in current dir, script dir, or parent dir
+    possible_cookie_paths = [
+        "cookies.txt",
+        os.path.join(os.path.dirname(__file__), "cookies.txt"),
+        os.path.join(os.path.dirname(__file__), "..", "cookies.txt"),
+        "/app/cookies.txt",
+        "/app/youtube-audio-backend/cookies.txt"
+    ]
+    for p in possible_cookie_paths:
+        if os.path.exists(p) and os.path.getsize(p) > 0:
             try:
-                shutil.copy("cookies.txt", COOKIE_FILE_PATH)
-                print("🔑 cookies.txt copied from project root to /tmp.", flush=True)
+                shutil.copy(p, COOKIE_FILE_PATH)
+                print(f"🔑 cookies.txt copied from {p} to {COOKIE_FILE_PATH}.", flush=True)
+                return
             except Exception as e:
-                print(f"⚠️ Failed to copy local cookies.txt: {e}", flush=True)
-        else:
-            print("⚠️ Warning: No cookies.txt found in project root or YOUTUBE_COOKIES env variable!", flush=True)
+                print(f"⚠️ Failed to copy {p}: {e}", flush=True)
+
+    print("⚠️ Warning: No cookies.txt found in repository or env variable!", flush=True)
 
 def cleanup_old_temp_files(max_age_seconds: int = 172800):
     """Clean up temp folders and rendered videos older than 48 hours."""
@@ -1357,19 +1367,19 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
     timeout_tier1 = max(120, int(clip_len * 2.5) + seeking_buffer)
     timeout_rescue = max(75, int(clip_len * 1.5) + (20 if start_sec > 1800 else 0))
 
-    target_format_hd = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
-    target_format_fast = f"best[height<={quality}]/best[height<=720]/bestvideo[height<={quality}]+bestaudio/best"
+    target_format_hd = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
+    target_format_fast = f"bestvideo[height<=720]+bestaudio/best[height<=720]/best"
 
     download_success = False
 
-    # 1. المرحلة الأولى: محاولة السحب عالي الدقة 1080p/720p مع الكوكيز وتجاوز خنق السرعة
+    # 1. المرحلة الأولى: محاولة السحب عالي الدقة مع الكوكيز عبر mweb,web
     try:
         ytdl_cmd = [
             'yt-dlp',
             '--no-playlist',
             '--socket-timeout', '30',
             '--concurrent-fragments', '5',
-            '--extractor-args', 'youtube:player_client=android,web',
+            '--extractor-args', 'youtube:player_client=mweb,web',
             '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
             '--force-keyframes-at-cuts',
             '-f', target_format_hd,
@@ -1385,60 +1395,57 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             download_success = True
         else:
             err_msg = res.stderr.strip()[:200] if res.stderr else "Unknown error"
-            print(f"⚠️ Tier 1 HD notice (code {res.returncode}): {err_msg}", flush=True)
+            print(f"⚠️ Tier 1 (with cookies) notice: {err_msg}", flush=True)
     except Exception as e1:
         print(f"⚠️ Tier 1 HD cut exception ({timeout_tier1}s): {e1}", flush=True)
 
-    # 2. المرحلة الثانية (محرك الإنقاذ فائق السرعة مع الكوكيز وتجاوز الخنق):
+    # 2. المرحلة الثانية (محرك الأندرويد و iOS المباشر بدون كوكيز لتخطي حظر الصور):
     if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
         if progress_callback:
-            progress_callback("⚡ جاري استخراج المقطع عبر محرك البث الفوري...")
+            progress_callback("⚡ جاري استخراج المقطع عبر محرك البث المباشر (Android/iOS Stream)...")
         try:
+            # تشغيل بدون كوكيز لأن عميل الأندرويد/iOS يرفض الكوكيز ويعطي الفيديو مباشرة بدون حظر
             ytdl_cmd_rescue = [
                 'yt-dlp',
                 '--no-playlist',
                 '--socket-timeout', '30',
                 '--concurrent-fragments', '5',
-                '--extractor-args', 'youtube:player_client=android,web',
+                '--extractor-args', 'youtube:player_client=android,ios',
                 '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
                 '--force-keyframes-at-cuts',
-                '-f', target_format_fast,
+                '-f', target_format_hd,
                 '--merge-output-format', 'mp4',
-                '-o', temp_raw
+                '-o', temp_raw,
+                url
             ]
-            if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-                ytdl_cmd_rescue.extend(['--cookies', COOKIE_FILE_PATH])
-            ytdl_cmd_rescue.append(url)
 
             res = subprocess.run(ytdl_cmd_rescue, capture_output=True, text=True, timeout=timeout_rescue)
             if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
                 download_success = True
             else:
                 err_msg = res.stderr.strip()[:200] if res.stderr else "Unknown error"
-                print(f"⚠️ Tier 2 rescue notice (code {res.returncode}): {err_msg}", flush=True)
+                print(f"⚠️ Tier 2 (Android/iOS Direct) notice: {err_msg}", flush=True)
         except Exception as e2:
             print(f"⚠️ Tier 2 rescue cut exception ({timeout_rescue}s): {e2}", flush=True)
 
-    # 3. المرحلة الثالثة: المحاولة الاحتياطية
+    # 3. المرحلة الثالثة: محرك التلفزيون والمتصفح البديل (TV / Web Fallback)
     if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
         if progress_callback:
-            progress_callback("🚀 جاري محاولة السحب عبر المحرك الاحتياطي...")
+            progress_callback("🚀 جاري محاولة السحب عبر المحرك الاحتياطي (TV Stream)...")
         try:
             ytdl_cmd_fallback = [
                 'yt-dlp',
                 '--no-playlist',
                 '--socket-timeout', '30',
                 '--concurrent-fragments', '5',
-                '--extractor-args', 'youtube:player_client=ios,android',
+                '--extractor-args', 'youtube:player_client=tv,mweb',
                 '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
                 '--force-keyframes-at-cuts',
-                '-f', 'best',
+                '-f', target_format_fast,
                 '--merge-output-format', 'mp4',
-                '-o', temp_raw
+                '-o', temp_raw,
+                url
             ]
-            if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-                ytdl_cmd_fallback.extend(['--cookies', COOKIE_FILE_PATH])
-            ytdl_cmd_fallback.append(url)
 
             res = subprocess.run(ytdl_cmd_fallback, capture_output=True, text=True, timeout=timeout_rescue)
             if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
