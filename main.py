@@ -870,6 +870,19 @@ def fix_arabic_spelling(text: str) -> str:
     import re
     t = text.strip().strip('"\'`')
     
+    # Correction for common ASR elongation mistakes on verbs and words
+    asr_verb_fixes = {
+        r"\bترضاع(\w*)\b": r"ترضع\1",
+        r"\bيرضاع(\w*)\b": r"يرضع\1",
+        r"\bتولاد(\w*)\b": r"تلد\1",
+        r"\bيولاد(\w*)\b": r"يلد\1",
+        r"\bتتعلام(\w*)\b": r"تتعلم\1",
+        r"\bيتعلام(\w*)\b": r"يتعلم\1",
+        r"\bتتكلموا\b": "تتكلمون",
+    }
+    for pat, rep in asr_verb_fixes.items():
+        t = re.sub(pat, rep, t)
+    
     # Common Tanween Adverbs
     tanween_map = {
         r"\bشكرا\b": "شكراً",
@@ -957,25 +970,21 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         "أنت خبير ومخرج ومونتير محترف في صناعة واقتطاع المحتوى الفيروسي الأكثر انتشاراً وتأثيراً على TikTok و Shorts و Reels (Viral Content Creator & Master Storyteller).\n"
         "مهمتك الأساسية والجوهرية: تحليل النص المفرغ واستخراج مقاطع قصيرة (Shorts) مميزة ومكتملة البنية تماماً (بداية مشوقة + سياق قوي + كشف السر/الإجابة + قفلة ختامية منطقية ومقنعة 100%).\n"
         "\n"
-        "⚠️ قواعد حاسمة لمنع المقاطع المبتورة والقفلات الخائبة (قواعد صارمة لا تقبل الاستثناء):\n"
-        "1. ممنوع منعاً باتاً استخراج 'مقدمة الفيديو التشويقية' فقط (No Intro-Only Teasers): يُمنع تماماً قص مقطع ينتهي بعبارات الإحالة للفيديو الطويل مثل: 'وده اللي هنتكلم عنه في الفيديو ده', 'والإجابة أبسط من كده بكتير', 'تعالوا نشوف إيه اللي حصل' دون أن يحتوي المقطع على الإجابة والشرح نفسه! إذا بدأ المقطع بمقدمة تشويقية عن سر أو خدعة أو مشكلة، يجب إطالة توقيت المقطع (end_time) ليشمل كشف السر والتفسير الفعلي والخاتمة بالكامل.\n"
-        "2. اكتمال الوعد والسر المطروح في العنوان (Payoff Guarantee): إذا كان العنوان يتحدث عن 'الخدعة المالية' أو 'سر إفلاس شركة' أو 'كيف حقق كذا'، يجب أن يحتوي سكربت المقطع المقصوص على شرح الخدعة أو السر الفعلي بالتفصيل والنتيجة التي حدثت، حتى يخرج المشاهد مستفيداً وفاهماً للموضوع بالكامل 100% دون أي شعور بالبتر أو الخداع.\n"
-        "3. اكتمال المعنى والنتيجة (Logical Punchline & Takeaway): يجب أن ينتهي المقطع دائماً عند نهاية جملة تامة مكتملة الأركان (النتيجة، الدرس المستفاد، أو خلاصة الفكرة). يُمنع منعاً باتاً إنهاء المقطع في منتصف جملة أو عند كلمات عطف ووصل (مثل: 'و...', 'لكن...', 'عشان...', 'لأن...', 'بس...', 'ثم...').\n"
-        "4. تصنيف نوع المقطع (category): صنف كل مقطع بإحدى القيم التالية:\n"
-        "   - '🎯 قصة وخلاصة مكتملة' (القصة كاملة مع نتيجتها وسرها - الأفضل دائماً)\n"
-        "   - '💡 سر ونصيحة ذهبية' (فكرة أو استراتيجية مع شرحها وخلاصتها)\n"
-        "   - '🔥 موقف درامي / صدمة' (موقف حدثت فيه مفارقة مع رد الفعل النهائي)\n"
-        "   - '⚡ مقطع تشويقي' (إذا كان مقطعاً سريعاً يثير الفضول فقط)\n"
+        "⚠️ قواعد حاسمة لمنع المقاطع المبتورة والقفلات الخائبة:\n"
+        "1. ممنوع منعاً باتاً استخراج 'مقدمة الفيديو التشويقية' فقط (No Intro-Only Teasers): يجب أن يشمل المقطع الشرح وكشف السر والخاتمة بالكامل.\n"
+        "2. اكتمال الوعد والسر المطروح في العنوان (Payoff Guarantee): يجب أن يحتوي سكربت المقطع المقصوص على شرح السر والنتيجة كاملة.\n"
+        "3. اكتمال المعنى والنتيجة: يجب أن ينتهي المقطع دائماً عند نهاية جملة تامة مكتملة الأركان.\n"
+        "4. تصنيف نوع المقطع (category): صنف كل مقطع (🎯 قصة وخلاصة مكتملة / 💡 سر ونصيحة ذهبية / 🔥 موقف درامي / صدمة / ⚡ مقطع تشويقي).\n"
         "\n"
-        "شروط العنوان الإلزامية:\n"
-        "1. الارتباط العميق بسكربت هذا المقطع تحديداً: يجب أن يغطي العنوان الحدث أو السر أو الصدمة أو الموقف الفعلي الذي يدور داخل هذا الشورت، وممنوع منعاً باتاً العناوين العامة المكررة التي تصلح لأي فيديو.\n"
-        "2. القوة والجرأة وإثارة الفضول (Curiosity Hook): اصنع عنواناً يطرح تساؤلاً أو يكشف جزءاً مثيراً دون حرق الخاتمة ليجعل المشاهد يكمل الفيديو لنهايته.\n"
-        "3. السلامة الإملائية واللغوية 100%: يجب أن يكون العنوان خالياً تماماً من أي أخطاء إملائية أو نحوية (انتبه للهمزات 'أ/إ/آ'، التاء المربوطة 'ة' والهاء 'ه'، وتنوين الفتح 'ـاً' مثل: شكراً، جداً، عاماً، ريالاً).\n"
-        "يجب أن تكون إجابتك بصيغة JSON فقط بالتنسيق التالي بدون أي نصوص إضافية خارج الـ JSON:\n"
+        "⚠️ شروط العنوان وتصحيح الأخطاء اللغوية الإلزامية:\n"
+        "1. التصحيح اللغوي والنحوي الإجباري (Mandatory Grammar & Spelling Correction): يُمنع منعاً باتاً نقل الأخطاء الإملائية أو اللغوية الناتجة عن التفريغ الصوتي (مثل: مد الحروف كـ 'ترضاعها' التي يجب تصحيحها حتماً إلى 'تُرضِعها'). يجب صياغة العنوان بلغة عربية فصيحة وسليمة نحوياً وإملائياً 100%.\n"
+        "2. الارتباط العميق بسكربت هذا المقطع تحديداً وإثارة الفضول القاتل (Curiosity Hook).\n"
+        "3. السلامة الإملائية التامة للهمزات والتاء المربوطة وتنوين الفتح (شكراً، جداً، عاماً).\n"
+        "يجب أن تكون إجابتك بصيغة JSON فقط بالتنسيق التالي:\n"
         "{\n"
         '  "shorts": [\n'
         '    {\n'
-        '      "title": "عنوان جريء ومثير يغطي قصة هذا المقطع بالذات وخالٍ تماماً من الأخطاء الإملائية",\n'
+        '      "title": "عنوان جريء ومثير ومصحح نحوياً وإملائياً 100%",\n'
         '      "category": "🎯 قصة وخلاصة مكتملة",\n'
         '      "start_time": "05:47",\n'
         '      "end_time": "06:50",\n'
@@ -987,10 +996,9 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
     )
     
     title_instruction = (
-        "5. صياغة عنوان فيروسي خاص ومحدد بدقة لسكربت هذا المقطع بعينه (Specific Contextual Hook):\n"
-        "   - افهم الحوار والمفارقة التي حدثت في هذا المقطع تحديداً، واجعل العنوان يحكي عن هذا الموقف الملموس وليس عنواناً عاماً لكامل الفيديو.\n"
-        "   - أطلق العنان للجرأة والفضول (Curiosity Gap & Suspense) مثل: 'اللحظة التي تغير فيها كل شيء بنفس الدقيقة...', 'كيف فكك هذا الفخ الصادم في ثوانٍ؟', 'السر الحقيقي الذي حاولوا إخفاءه طوال السنوات!'.\n"
-        "   - التدقيق الإملائي الإلزامي: كتابة العنوان بدقة لغوية وإملائية تامة 100% بدون أي أخطاء في الهمزات أو التاء المربوطة أو التنوين."
+        "5. صياغة عنوان فيروسي خاص ومحدد بدقة ومصحح لغوياً 100%:\n"
+        "   - افهم الحوار والمفارقة التي حدثت في هذا المقطع تحديداً واجعله جذاباً.\n"
+        "   - التدقيق النحوي والإملائي الإلزامي: صحح أي أخطاء لغوية أو نطقية واردة في التفريغ وتأكد من سلامة تصريف الأفعال والهمزات والتنوين تماماً."
     )
     if title_style == "short":
         title_instruction = (
@@ -1362,24 +1370,21 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
     extended_end_time_str = format_seconds_to_time_str(end_sec + end_extension)
     temp_raw = output_path + ".raw.mp4"
 
-    # Dynamic timeout: adds buffer for seeking deep in long videos (over 30 min)
-    seeking_buffer = 45 if start_sec > 1800 else 0
-    timeout_tier1 = max(120, int(clip_len * 2.5) + seeking_buffer)
-    timeout_rescue = max(75, int(clip_len * 1.5) + (20 if start_sec > 1800 else 0))
+    # مهلة سخية تضمن اكتمال تنزيل الـ 1080p بدون قطع الاتصال
+    timeout_tier1 = max(360, int(clip_len * 3.5) + 180)
+    timeout_rescue = max(240, int(clip_len * 2.5) + 120)
 
-    target_format_hd = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
-    target_format_fast = f"bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+    target_format_hd = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
 
     download_success = False
 
-    # 1. المرحلة الأولى: محاولة السحب عالي الدقة مع الكوكيز عبر mweb,web
+    # 1. المرحلة الأولى: السحب عالي الدقة 1080p الأصلي بالكوكيز
     try:
         ytdl_cmd = [
             'yt-dlp',
             '--no-playlist',
             '--socket-timeout', '30',
             '--concurrent-fragments', '5',
-            '--extractor-args', 'youtube:player_client=mweb,web',
             '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
             '--force-keyframes-at-cuts',
             '-f', target_format_hd,
@@ -1395,66 +1400,35 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             download_success = True
         else:
             err_msg = res.stderr.strip()[:200] if res.stderr else "Unknown error"
-            print(f"⚠️ Tier 1 (with cookies) notice: {err_msg}", flush=True)
+            print(f"⚠️ Tier 1 notice (code {res.returncode}): {err_msg}", flush=True)
     except Exception as e1:
-        print(f"⚠️ Tier 1 HD cut exception ({timeout_tier1}s): {e1}", flush=True)
+        print(f"⚠️ Tier 1 cut exception ({timeout_tier1}s): {e1}", flush=True)
 
-    # 2. المرحلة الثانية (محرك الأندرويد و iOS المباشر بدون كوكيز لتخطي حظر الصور):
+    # 2. المرحلة الثانية: إعادة المحاولة بنفس دقة 1080p الكاملة
     if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
         if progress_callback:
-            progress_callback("⚡ جاري استخراج المقطع عبر محرك البث المباشر (Android/iOS Stream)...")
+            progress_callback("⚡ جاري إعادة محاولة استخراج المقطع بأعلى دقة 1080p...")
         try:
-            # تشغيل بدون كوكيز لأن عميل الأندرويد/iOS يرفض الكوكيز ويعطي الفيديو مباشرة بدون حظر
-            ytdl_cmd_rescue = [
+            ytdl_cmd_retry = [
                 'yt-dlp',
                 '--no-playlist',
                 '--socket-timeout', '30',
                 '--concurrent-fragments', '5',
-                '--extractor-args', 'youtube:player_client=android,ios',
                 '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
                 '--force-keyframes-at-cuts',
                 '-f', target_format_hd,
                 '--merge-output-format', 'mp4',
-                '-o', temp_raw,
-                url
+                '-o', temp_raw
             ]
+            if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+                ytdl_cmd_retry.extend(['--cookies', COOKIE_FILE_PATH])
+            ytdl_cmd_retry.append(url)
 
-            res = subprocess.run(ytdl_cmd_rescue, capture_output=True, text=True, timeout=timeout_rescue)
+            res = subprocess.run(ytdl_cmd_retry, capture_output=True, text=True, timeout=timeout_rescue)
             if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
                 download_success = True
-            else:
-                err_msg = res.stderr.strip()[:200] if res.stderr else "Unknown error"
-                print(f"⚠️ Tier 2 (Android/iOS Direct) notice: {err_msg}", flush=True)
         except Exception as e2:
-            print(f"⚠️ Tier 2 rescue cut exception ({timeout_rescue}s): {e2}", flush=True)
-
-    # 3. المرحلة الثالثة: محرك التلفزيون والمتصفح البديل (TV / Web Fallback)
-    if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
-        if progress_callback:
-            progress_callback("🚀 جاري محاولة السحب عبر المحرك الاحتياطي (TV Stream)...")
-        try:
-            ytdl_cmd_fallback = [
-                'yt-dlp',
-                '--no-playlist',
-                '--socket-timeout', '30',
-                '--concurrent-fragments', '5',
-                '--extractor-args', 'youtube:player_client=tv,mweb',
-                '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
-                '--force-keyframes-at-cuts',
-                '-f', target_format_fast,
-                '--merge-output-format', 'mp4',
-                '-o', temp_raw,
-                url
-            ]
-
-            res = subprocess.run(ytdl_cmd_fallback, capture_output=True, text=True, timeout=timeout_rescue)
-            if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
-                download_success = True
-            else:
-                err_msg = res.stderr.strip()[:200] if res.stderr else "Unknown error"
-                print(f"⚠️ Tier 3 fallback notice (code {res.returncode}): {err_msg}", flush=True)
-        except Exception as e3:
-            print(f"⚠️ Tier 3 cut exception: {e3}", flush=True)
+            print(f"⚠️ Tier 2 cut exception: {e2}", flush=True)
 
     # التحقق من وجود الملف المؤقت أو الملفات الجزئية
     if not os.path.exists(temp_raw):
@@ -1488,7 +1462,15 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
         except: pass
 
         if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            print(f"🎉 Cut completed successfully! ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
+            res_info = f"{quality}p"
+            try:
+                probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', output_path]
+                dim = subprocess.check_output(probe_cmd, text=True, timeout=5).strip()
+                if dim and 'x' in dim:
+                    res_info = f"{dim} ({dim.split('x')[1]}p Full HD)" if int(dim.split('x')[1]) >= 1080 else f"{dim} ({dim.split('x')[1]}p)"
+            except Exception:
+                pass
+            print(f"🎉 Cut completed successfully! [📺 Output Quality / Resolution: {res_info}] ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
             return output_path
         elif os.path.exists(temp_raw):
             try: os.rename(temp_raw, output_path)
@@ -1555,13 +1537,22 @@ def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
 
         cut_segment_fast(req.url, start_sec, end_sec, req.quality, output_path, progress_callback=update_prog)
 
+        res_info = f"{req.quality}p"
+        try:
+            probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', output_path]
+            dim = subprocess.check_output(probe_cmd, text=True, timeout=5).strip()
+            if dim and 'x' in dim:
+                res_info = f"{dim} ({dim.split('x')[1]}p)"
+        except Exception:
+            pass
+
         video_url = f"public/temp_{task_id}/short_clip.mp4"
         TASKS[task_id] = {
             "status": "success",
             "progress": "✅ تم قص المقطع بنجاح!",
             "videoUrl": video_url
         }
-        print(f"[{task_id}] Async Cut completed successfully: {video_url}", flush=True)
+        print(f"[{task_id}] Async Cut completed successfully: {video_url} [📺 Quality: {res_info}]", flush=True)
 
     except Exception as e:
         print(f"[{task_id}] Async Cut failed: {e}", flush=True)
