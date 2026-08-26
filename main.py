@@ -1982,6 +1982,48 @@ async def zernio_get_accounts(payload: dict):
         if isinstance(e, HTTPException): raise e
         raise HTTPException(500, f"Failed to connect to Zernio: {str(e)}")
 
+def resolve_zernio_media_item(api_key: str, video_url: str) -> dict:
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json"
+    }
+
+    local_path = None
+    if "public/" in video_url:
+        rel = video_url.split("public/", 1)[1]
+        candidate = os.path.join(PUBLIC_DIR, rel)
+        if os.path.exists(candidate):
+            local_path = candidate
+
+    if local_path and os.path.exists(local_path):
+        try:
+            filename = os.path.basename(local_path)
+            presign_res = requests.post(
+                "https://zernio.com/api/v1/media/presign",
+                headers=headers,
+                json={"filename": filename, "contentType": "video/mp4", "permanent": True},
+                timeout=15
+            )
+            if presign_res.status_code == 200:
+                pdata = presign_res.json()
+                upload_url = pdata.get("uploadUrl")
+                public_url = pdata.get("publicUrl")
+                if upload_url and public_url:
+                    with open(local_path, "rb") as f_in:
+                        put_res = requests.put(
+                            upload_url,
+                            data=f_in,
+                            headers={"Content-Type": "video/mp4"},
+                            timeout=180
+                        )
+                        if put_res.status_code in [200, 201, 204]:
+                            print(f"✅ Video successfully uploaded to Zernio CDN: {public_url}", flush=True)
+                            return {"type": "video", "url": public_url}
+        except Exception as upload_err:
+            print(f"⚠️ Zernio presigned upload fallback: {upload_err}", flush=True)
+
+    return {"type": "video", "url": video_url}
+
 @app.post("/api/zernio/schedule-post")
 async def zernio_schedule_post(req: ZernioScheduleRequest):
     api_key = req.apiKey or os.environ.get("ZERNIO_API_KEY")
@@ -2031,15 +2073,12 @@ async def zernio_schedule_post(req: ZernioScheduleRequest):
             "accountId": account_id
         }
 
+        media_item = resolve_zernio_media_item(api_key, req.videoUrl)
+
         post_body = {
             "content": req.content,
             "platforms": [platform_entry],
-            "media": [
-                {
-                    "type": "video",
-                    "url": req.videoUrl
-                }
-            ],
+            "mediaItems": [media_item],
             "publishNow": req.publishNow
         }
 
