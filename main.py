@@ -1943,180 +1943,272 @@ async def convert_vertical_async(
     return {"status": "processing", "taskId": task_id}
 
 
-# ==================== Zernio Social Media Posting & TikTok Scheduler API ====================
+# ==================== Buffer Social Media & TikTok Publishing API ====================
 
-class ZernioScheduleRequest(BaseModel):
+class BufferPostRequest(BaseModel):
     apiKey: str
+    channelId: str | None = None
+    organizationId: str | None = None
     content: str
     videoUrl: str
     publishNow: bool = False
     scheduledFor: str | None = None
-    accountId: str | None = None
-    platform: str = "tiktok"
+    saveToDraft: bool = False
 
-@app.post("/api/zernio/accounts")
-@app.post("/api/zernio/profiles")
-async def zernio_get_accounts(payload: dict):
-    api_key = payload.get("apiKey") or os.environ.get("ZERNIO_API_KEY")
+@app.post("/api/buffer/channels")
+async def buffer_get_channels(payload: dict):
+    api_key = payload.get("apiKey") or os.environ.get("BUFFER_API_KEY")
     if not api_key:
-        raise HTTPException(400, "Zernio API Key is required.")
+        raise HTTPException(400, "Buffer API Key is required.")
     
     headers = {
         "Authorization": f"Bearer {api_key.strip()}",
         "Content-Type": "application/json"
     }
 
+    account_query = """
+    query GetAccountAndOrgs {
+      account {
+        id
+        email
+        organizations {
+          id
+          name
+        }
+      }
+    }
+    """
     try:
-        res = requests.get("https://zernio.com/api/v1/accounts", headers=headers, timeout=20)
-        if res.status_code == 200:
-            return res.json()
-    except Exception:
-        pass
+        res = requests.post(
+            "https://api.buffer.com",
+            headers=headers,
+            json={"query": account_query},
+            timeout=20
+        )
+        if res.status_code != 200:
+            raise HTTPException(res.status_code, f"Buffer API Error: {res.text}")
+        
+        data = res.json()
+        if "errors" in data and not data.get("data"):
+            raise HTTPException(400, f"Buffer GraphQL Error: {data['errors'][0].get('message')}")
+        
+        account_data = data.get("data", {}).get("account", {})
+        organizations = account_data.get("organizations", [])
+        
+        all_channels = []
+        for org in organizations:
+            org_id = org.get("id")
+            if not org_id:
+                continue
+            channels_query = """
+            query GetChannels($input: ChannelsInput!) {
+              channels(input: $input) {
+                id
+                name
+                service
+                displayName
+                avatar
+              }
+            }
+            """
+            c_res = requests.post(
+                "https://api.buffer.com",
+                headers=headers,
+                json={
+                    "query": channels_query,
+                    "variables": {"input": {"organizationId": org_id}}
+                },
+                timeout=20
+            )
+            if c_res.status_code == 200:
+                c_data = c_res.json()
+                ch_list = c_data.get("data", {}).get("channels", [])
+                for ch in ch_list:
+                    ch["organizationId"] = org_id
+                    ch["orgName"] = org.get("name")
+                    all_channels.append(ch)
 
-    try:
-        res_prof = requests.get("https://zernio.com/api/v1/profiles", headers=headers, timeout=20)
-        if res_prof.status_code == 200:
-            return res_prof.json()
-        raise HTTPException(res_prof.status_code, f"Zernio API Error: {res_prof.text}")
+        return {
+            "account": account_data,
+            "channels": all_channels
+        }
     except Exception as e:
-        if isinstance(e, HTTPException): raise e
-        raise HTTPException(500, f"Failed to connect to Zernio: {str(e)}")
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(500, f"Failed to connect to Buffer: {str(e)}")
 
-def resolve_zernio_media_item(api_key: str, video_url: str) -> dict:
+@app.post("/api/buffer/create-post")
+async def buffer_create_post(req: BufferPostRequest):
+    api_key = req.apiKey or os.environ.get("BUFFER_API_KEY")
+    if not api_key:
+        raise HTTPException(400, "Buffer API Key is required.")
+    
+    if not req.videoUrl:
+        raise HTTPException(400, "Video URL is required for Buffer posting.")
+
     headers = {
         "Authorization": f"Bearer {api_key.strip()}",
         "Content-Type": "application/json"
     }
 
-    local_path = None
-    if "public/" in video_url:
-        rel = video_url.split("public/", 1)[1]
-        candidate = os.path.join(PUBLIC_DIR, rel)
-        if os.path.exists(candidate):
-            local_path = candidate
-
-    if local_path and os.path.exists(local_path):
+    # Auto-resolve channelId if not supplied
+    channel_id = req.channelId
+    if not channel_id:
         try:
-            filename = os.path.basename(local_path)
-            presign_res = requests.post(
-                "https://zernio.com/api/v1/media/presign",
-                headers=headers,
-                json={"filename": filename, "contentType": "video/mp4", "permanent": True},
-                timeout=15
-            )
-            if presign_res.status_code == 200:
-                pdata = presign_res.json()
-                upload_url = pdata.get("uploadUrl")
-                public_url = pdata.get("publicUrl")
-                if upload_url and public_url:
-                    with open(local_path, "rb") as f_in:
-                        put_res = requests.put(
-                            upload_url,
-                            data=f_in,
-                            headers={"Content-Type": "video/mp4"},
-                            timeout=180
-                        )
-                        if put_res.status_code in [200, 201, 204]:
-                            print(f"✅ Video successfully uploaded to Zernio CDN: {public_url}", flush=True)
-                            return {"type": "video", "url": public_url}
-        except Exception as upload_err:
-            print(f"⚠️ Zernio presigned upload fallback: {upload_err}", flush=True)
+            ch_data = await buffer_get_channels({"apiKey": api_key})
+            channels = ch_data.get("channels", [])
+            for ch in channels:
+                if ch.get("service") == "tiktok":
+                    channel_id = ch.get("id")
+                    break
+                if not channel_id:
+                    channel_id = ch.get("id")
+        except Exception as err:
+            print(f"Auto-resolve channel failed: {err}", flush=True)
 
-    return {"type": "video", "url": video_url}
+    if not channel_id:
+        raise HTTPException(400, "لم يتم العثور على أي قناة مربوطة في حساب Buffer الخاص بك. يرجى ربط حساب TikTok في لوحة Buffer.")
 
-@app.post("/api/zernio/schedule-post")
-async def zernio_schedule_post(req: ZernioScheduleRequest):
-    api_key = req.apiKey or os.environ.get("ZERNIO_API_KEY")
-    if not api_key:
-        raise HTTPException(400, "Zernio API Key is required.")
+    if req.publishNow:
+        mode = "shareNow"
+    elif req.scheduledFor:
+        mode = "customScheduled"
+    else:
+        mode = "addToQueue"
 
-    if not req.videoUrl:
-        raise HTTPException(400, "Video URL is required for TikTok posting.")
+    input_payload = {
+        "channelId": channel_id,
+        "text": req.content,
+        "schedulingType": "automatic",
+        "mode": mode,
+        "assets": [
+            {
+                "video": {
+                    "url": req.videoUrl
+                }
+            }
+        ]
+    }
+
+    if req.scheduledFor and mode == "customScheduled":
+        input_payload["dueAt"] = req.scheduledFor
+
+    if req.saveToDraft:
+        input_payload["saveToDraft"] = True
+
+    create_mutation = """
+    mutation CreatePost($input: CreatePostInput!) {
+      createPost(input: $input) {
+        ... on PostActionSuccess {
+          post {
+            id
+            status
+            dueAt
+            text
+          }
+        }
+        ... on MutationError {
+          message
+        }
+      }
+    }
+    """
 
     try:
-        headers = {
-            "Authorization": f"Bearer {api_key.strip()}",
-            "Content-Type": "application/json",
-            "x-request-id": str(uuid.uuid4())
-        }
+        res = requests.post(
+            "https://api.buffer.com",
+            headers=headers,
+            json={
+                "query": create_mutation,
+                "variables": {"input": input_payload}
+            },
+            timeout=30
+        )
+        if res.status_code != 200:
+            raise HTTPException(res.status_code, f"Buffer API Error: {res.text}")
 
-        # Auto-resolve accountId if not supplied
-        account_id = req.accountId
-        if not account_id:
-            try:
-                acc_res = requests.get("https://zernio.com/api/v1/accounts", headers=headers, timeout=15)
-                if acc_res.status_code == 200:
-                    acc_data = acc_res.json()
-                    accounts_list = acc_data.get("accounts") or acc_data.get("data") or (acc_data if isinstance(acc_data, list) else [])
-                    for acc in accounts_list:
-                        if acc.get("platform") == req.platform:
-                            account_id = acc.get("_id") or acc.get("id") or acc.get("accountId")
-                            break
-                        if not account_id:
-                            account_id = acc.get("_id") or acc.get("id") or acc.get("accountId")
-                
-                if not account_id:
-                    prof_res = requests.get("https://zernio.com/api/v1/profiles", headers=headers, timeout=15)
-                    if prof_res.status_code == 200:
-                        prof_data = prof_res.json()
-                        profiles_list = prof_data.get("profiles") or (prof_data if isinstance(prof_data, list) else [])
-                        if profiles_list:
-                            account_id = profiles_list[0].get("_id") or profiles_list[0].get("id")
-            except Exception as e:
-                print(f"Failed to auto-resolve accountId: {e}", flush=True)
+        res_json = res.json()
+        if "errors" in res_json and not res_json.get("data"):
+            raise HTTPException(400, f"Buffer Error: {res_json['errors'][0].get('message')}")
 
-        if not account_id:
-            raise HTTPException(400, "لم يتم العثور على معرف الحساب (accountId). يرجى التأكد من ربط حساب TikTok داخل لوحة تحكم Zernio.")
+        create_result = res_json.get("data", {}).get("createPost", {})
+        if "message" in create_result and "post" not in create_result:
+            raise HTTPException(400, f"Buffer Mutation Error: {create_result['message']}")
 
-        platform_entry = {
-            "platform": req.platform,
-            "accountId": account_id
-        }
-
-        media_item = resolve_zernio_media_item(api_key, req.videoUrl)
-
-        post_body = {
-            "content": req.content,
-            "platforms": [platform_entry],
-            "mediaItems": [media_item],
-            "publishNow": req.publishNow
-        }
-
-        if req.scheduledFor and not req.publishNow:
-            post_body["scheduledFor"] = req.scheduledFor
-            post_body["isDraft"] = False
-
-        res = requests.post("https://zernio.com/api/v1/posts", headers=headers, json=post_body, timeout=30)
-        if res.status_code not in [200, 201]:
-            raise HTTPException(res.status_code, f"Zernio Post Error: {res.text}")
-
+        action_msg = "تم نشر الفيديو فوراً على حسابك بنجاح!" if req.publishNow else ("تمت جدولة الفيديو في الموعد المحدد بنجاح!" if req.scheduledFor else "تمت إضافة الفيديو إلى طابور النشر (Queue) بنجاح!")
         return {
             "status": "success",
-            "message": "تم إرسال الفيديو لـ TikTok بنجاح!" if req.publishNow else "تمت جدولة الفيديو على TikTok بنجاح!",
-            "data": res.json()
+            "message": action_msg,
+            "data": create_result
         }
     except Exception as e:
-        if isinstance(e, HTTPException): raise e
-        raise HTTPException(500, f"Error posting to Zernio: {str(e)}")
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(500, f"Failed to post to Buffer: {str(e)}")
 
-@app.post("/api/zernio/posts")
-async def zernio_list_posts(payload: dict):
-    api_key = payload.get("apiKey") or os.environ.get("ZERNIO_API_KEY")
+@app.post("/api/buffer/posts")
+async def buffer_get_posts(payload: dict):
+    api_key = payload.get("apiKey") or os.environ.get("BUFFER_API_KEY")
     if not api_key:
-        raise HTTPException(400, "Zernio API Key is required.")
+        raise HTTPException(400, "Buffer API Key is required.")
+
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json"
+    }
 
     try:
-        headers = {
-            "Authorization": f"Bearer {api_key.strip()}",
-            "Content-Type": "application/json"
+        ch_info = await buffer_get_channels({"apiKey": api_key})
+        channels = ch_info.get("channels", [])
+        if not channels:
+            return {"posts": []}
+
+        org_id = payload.get("organizationId") or channels[0].get("organizationId")
+        if not org_id:
+            return {"posts": []}
+
+        channel_ids = [ch["id"] for ch in channels]
+        posts_query = """
+        query GetScheduledPosts($input: PostsInput!) {
+          posts(input: $input, first: 20) {
+            edges {
+              node {
+                id
+                text
+                status
+                dueAt
+                createdAt
+                channelId
+              }
+            }
+          }
         }
-        res = requests.get("https://zernio.com/api/v1/posts", headers=headers, timeout=20)
-        if res.status_code != 200:
-            raise HTTPException(res.status_code, f"Zernio API Error: {res.text}")
-        return res.json()
+        """
+        res = requests.post(
+            "https://api.buffer.com",
+            headers=headers,
+            json={
+                "query": posts_query,
+                "variables": {
+                    "input": {
+                        "organizationId": org_id,
+                        "filter": {
+                            "channelIds": channel_ids
+                        }
+                    }
+                }
+            },
+            timeout=20
+        )
+        if res.status_code == 200:
+            data = res.json()
+            edges = data.get("data", {}).get("posts", {}).get("edges", [])
+            posts_list = [e.get("node") for e in edges if e.get("node")]
+            return {"posts": posts_list}
+        return {"posts": []}
     except Exception as e:
-        if isinstance(e, HTTPException): raise e
-        raise HTTPException(500, f"Failed to list posts from Zernio: {str(e)}")
+        print(f"Error fetching Buffer posts: {e}", flush=True)
+        return {"posts": []}
 
 
 
