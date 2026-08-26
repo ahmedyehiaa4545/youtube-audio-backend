@@ -36,7 +36,33 @@ TEMP_DIR = os.path.abspath("temp")
 os.makedirs(PUBLIC_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Mount public folder to serve downloaded audio files statically
+@app.api_route("/public/{file_path:path}", methods=["GET", "HEAD", "OPTIONS"])
+async def serve_public_media(file_path: str):
+    full_path = os.path.abspath(os.path.join(PUBLIC_DIR, file_path))
+    if not os.path.exists(full_path) or not full_path.startswith(PUBLIC_DIR):
+        raise HTTPException(status_code=404, detail="Media file not found")
+    
+    file_size = os.path.getsize(full_path)
+    file_ext = os.path.splitext(full_path)[1].lower()
+    media_type = "video/mp4" if file_ext == ".mp4" else ("audio/mpeg" if file_ext == ".mp3" else "application/octet-stream")
+    
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(file_size),
+        "Content-Type": media_type,
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Cache-Control": "public, max-age=604800",
+    }
+    
+    return FileResponse(
+        full_path,
+        media_type=media_type,
+        headers=headers
+    )
+
+# Mount public folder as fallback
 app.mount("/public", StaticFiles(directory=PUBLIC_DIR), name="public")
 
 COOKIE_FILE_PATH = "/tmp/cookies.txt"
@@ -2038,44 +2064,16 @@ async def buffer_get_channels(payload: dict):
         raise HTTPException(500, f"Failed to connect to Buffer: {str(e)}")
 
 def upload_to_public_cdn(file_path: str) -> str:
-    """Uploads video to reliable global media CDNs (Litterbox, Catbox, tmpfiles) for 100% Buffer acceptance"""
+    """Uploads video to reliable global media CDNs (tmpfiles.org) with Cloudflare direct streaming for 100% Buffer acceptance"""
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
         return ""
         
-    # 1. Try Litterbox (72 hours temporary - high speed CDN, zero bot blockers)
-    try:
-        url = "https://litterbox.catbox.moe/resources/internals/api.php"
-        data = {"reqtype": "fileupload", "time": "72h"}
-        with open(file_path, "rb") as f:
-            files = {"fileToUpload": f}
-            res = requests.post(url, data=data, files=files, timeout=45)
-            if res.status_code == 200 and res.text.strip().startswith("http"):
-                cdn_url = res.text.strip()
-                print(f"🌟 Uploaded video to Litterbox CDN for Buffer: {cdn_url}", flush=True)
-                return cdn_url
-    except Exception as e:
-        print(f"Litterbox upload fallback: {e}", flush=True)
-
-    # 2. Try Catbox (Permanent)
-    try:
-        url = "https://catbox.moe/user/api.php"
-        data = {"reqtype": "fileupload"}
-        with open(file_path, "rb") as f:
-            files = {"fileToUpload": f}
-            res = requests.post(url, data=data, files=files, timeout=45)
-            if res.status_code == 200 and res.text.strip().startswith("http"):
-                cdn_url = res.text.strip()
-                print(f"🌟 Uploaded video to Catbox CDN for Buffer: {cdn_url}", flush=True)
-                return cdn_url
-    except Exception as e:
-        print(f"Catbox upload fallback: {e}", flush=True)
-
-    # 3. Try tmpfiles.org
+    # 1. Try tmpfiles.org (Cloudflare-backed, global CDN, direct .mp4, fully accessible by Buffer & AWS)
     try:
         url = "https://tmpfiles.org/api/v1/upload"
         with open(file_path, "rb") as f:
             files = {"file": f}
-            res = requests.post(url, files=files, timeout=45)
+            res = requests.post(url, files=files, timeout=40)
             if res.status_code == 200:
                 d = res.json()
                 raw_url = d.get("data", {}).get("url", "")
@@ -2103,13 +2101,13 @@ async def buffer_upload_media(file: UploadFile = File(...)):
         with open(target_path, "wb") as f_out:
             shutil.copyfileobj(file.file, f_out)
             
-        # 1. Try global CDN for 100% Buffer acceptance
+        # 1. Try global Cloudflare CDN
         cdn_url = upload_to_public_cdn(target_path)
         if cdn_url:
             print(f"✅ Uploaded media for Buffer (CDN): {cdn_url}", flush=True)
             return {"status": "success", "videoUrl": cdn_url}
         
-        # 2. Fallback to direct Railway static URL
+        # 2. Fallback to direct Railway static URL with streaming headers
         domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
         if domain:
             public_url = f"https://{domain}/public/buffer_{upload_id}/{out_filename}"
@@ -2151,8 +2149,8 @@ async def buffer_create_post(req: BufferPostRequest):
             rel = "public/" + video_url.split("public/", 1)[1]
             video_url = f"{domain_prefix}/{rel}"
             
-    # 3. If video_url is a local Railway link, upload to CDN so Buffer downloads without restriction
-    if ("/public/" in video_url) and not any(cdn in video_url for cdn in ["catbox", "tmpfiles", "litterbox"]):
+    # 3. If video_url is a local Railway link, attempt Cloudflare CDN upload for 100% Buffer acceptance
+    if ("/public/" in video_url) and not any(cdn in video_url for cdn in ["tmpfiles", "cloudinary"]):
         try:
             rel_path = video_url.split("/public/", 1)[1]
             local_target = os.path.join(PUBLIC_DIR, rel_path)
@@ -2216,13 +2214,16 @@ async def buffer_create_post(req: BufferPostRequest):
 
     input_payload = {
         "channelId": channel_id,
-        "text": req.content,
+        "text": req.content or "#shorts #fyp #viral #rekaption",
         "schedulingType": "automatic",
         "mode": mode,
         "assets": [
             {
                 "video": {
-                    "url": video_url
+                    "url": video_url,
+                    "metadata": {
+                        "thumbnailOffset": 1000
+                    }
                 }
             }
         ]
@@ -2266,12 +2267,40 @@ async def buffer_create_post(req: BufferPostRequest):
             raise HTTPException(res.status_code, f"Buffer API Error: {res.text}")
 
         res_json = res.json()
+        print(f"Buffer GraphQL Raw Response: {res_json}", flush=True)
+
         if "errors" in res_json and not res_json.get("data"):
-            raise HTTPException(400, f"Buffer Error: {res_json['errors'][0].get('message')}")
+            err_msg = res_json['errors'][0].get('message', '')
+            if "thumbnail" in err_msg.lower() or "metadata" in err_msg.lower():
+                input_payload["assets"][0]["video"].pop("metadata", None)
+                retry_res = requests.post(
+                    "https://api.buffer.com",
+                    headers=headers,
+                    json={"query": create_mutation, "variables": {"input": input_payload}},
+                    timeout=30
+                )
+                res_json = retry_res.json()
+                print(f"Buffer Retry without metadata: {res_json}", flush=True)
+                
+            if "errors" in res_json and not res_json.get("data"):
+                raise HTTPException(400, f"Buffer Error: {res_json['errors'][0].get('message')}")
 
         create_result = res_json.get("data", {}).get("createPost", {})
         if "message" in create_result and "post" not in create_result:
-            raise HTTPException(400, f"Buffer Mutation Error: {create_result['message']}")
+            err_msg = create_result['message']
+            if ("thumbnail" in err_msg.lower() or "metadata" in err_msg.lower()) and "metadata" in input_payload["assets"][0]["video"]:
+                input_payload["assets"][0]["video"].pop("metadata", None)
+                retry_res = requests.post(
+                    "https://api.buffer.com",
+                    headers=headers,
+                    json={"query": create_mutation, "variables": {"input": input_payload}},
+                    timeout=30
+                )
+                res_json = retry_res.json()
+                create_result = res_json.get("data", {}).get("createPost", {})
+                
+            if "message" in create_result and "post" not in create_result:
+                raise HTTPException(400, f"Buffer Mutation Error: {create_result['message']}")
 
         action_msg = "تم نشر الفيديو فوراً على حسابك بنجاح!" if req.publishNow else ("تمت جدولة الفيديو في الموعد المحدد بنجاح!" if req.scheduledFor else "تمت إضافة الفيديو إلى طابور النشر (Queue) بنجاح!")
         return {
