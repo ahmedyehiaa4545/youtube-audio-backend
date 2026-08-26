@@ -2081,9 +2081,6 @@ async def buffer_create_post(req: BufferPostRequest):
     # Smart URL Fixer & Resolution
     video_url = req.videoUrl.strip()
     
-    # 1. Replace broken legacy typo domain
-    video_url = video_url.replace("backenf-production.up.railway.app", "rekaption2-production.up.railway.app")
-    
     # 2. If relative path, prepend current domain
     current_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
     domain_prefix = f"https://{current_domain}" if current_domain else "https://youtube-audio-backend-production-a2d5.up.railway.app"
