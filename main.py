@@ -2092,8 +2092,26 @@ async def buffer_create_post(req: BufferPostRequest):
         if "public/" in video_url:
             rel = "public/" + video_url.split("public/", 1)[1]
             video_url = f"{domain_prefix}/{rel}"
+    # 3. If video_url is an endpoint (e.g. /api/render-download) or does not end with a direct video extension, fetch and host it statically
+    if "/api/render-download/" in video_url or not any(video_url.lower().split("?")[0].endswith(ext) for ext in [".mp4", ".mov", ".webm", ".m4v"]):
+        try:
+            print(f"📥 Fetching video from {video_url} to host direct static MP4 for Buffer...", flush=True)
+            dl_res = requests.get(video_url, timeout=60, stream=True)
+            if dl_res.status_code == 200:
+                upload_id = str(uuid.uuid4())
+                task_dir = os.path.join(PUBLIC_DIR, f"buffer_{upload_id}")
+                os.makedirs(task_dir, exist_ok=True)
+                target_path = os.path.join(task_dir, "video.mp4")
+                with open(target_path, "wb") as f_out:
+                    for chunk in dl_res.iter_content(chunk_size=16384):
+                        if chunk:
+                            f_out.write(chunk)
+                video_url = f"{domain_prefix}/public/buffer_{upload_id}/video.mp4"
+                print(f"✅ Created direct static MP4 for Buffer: {video_url} ({os.path.getsize(target_path)} bytes)", flush=True)
+        except Exception as dl_err:
+            print(f"⚠️ Stream caching fallback warning: {dl_err}", flush=True)
             
-    print(f"🚀 Buffer Create Post: video URL = {video_url}", flush=True)
+    print(f"🚀 Buffer Create Post: final video URL = {video_url}", flush=True)
 
     # Auto-resolve channelId if not supplied
     channel_id = req.channelId
