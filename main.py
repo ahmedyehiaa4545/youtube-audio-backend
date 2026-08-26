@@ -2063,32 +2063,9 @@ async def buffer_get_channels(payload: dict):
             raise e
         raise HTTPException(500, f"Failed to connect to Buffer: {str(e)}")
 
-def upload_to_public_cdn(file_path: str) -> str:
-    """Uploads video to reliable global media CDNs (tmpfiles.org) with Cloudflare direct streaming for 100% Buffer acceptance"""
-    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        return ""
-        
-    # 1. Try tmpfiles.org (Cloudflare-backed, global CDN, direct .mp4, fully accessible by Buffer & AWS)
-    try:
-        url = "https://tmpfiles.org/api/v1/upload"
-        with open(file_path, "rb") as f:
-            files = {"file": f}
-            res = requests.post(url, files=files, timeout=40)
-            if res.status_code == 200:
-                d = res.json()
-                raw_url = d.get("data", {}).get("url", "")
-                if "tmpfiles.org/" in raw_url:
-                    cdn_url = raw_url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
-                    print(f"🌟 Uploaded video to tmpfiles CDN for Buffer: {cdn_url}", flush=True)
-                    return cdn_url
-    except Exception as e:
-        print(f"tmpfiles upload fallback: {e}", flush=True)
-
-    return ""
-
 @app.post("/api/buffer/upload-media")
 async def buffer_upload_media(file: UploadFile = File(...)):
-    """Uploads a video blob/file directly and returns a high-speed CDN / permanent HTTPS public URL for Buffer"""
+    """Uploads a video blob/file directly and returns a direct HTTPS public URL on Railway with streaming headers for Buffer"""
     try:
         upload_id = str(uuid.uuid4())
         task_dir = os.path.join(PUBLIC_DIR, f"buffer_{upload_id}")
@@ -2101,20 +2078,13 @@ async def buffer_upload_media(file: UploadFile = File(...)):
         with open(target_path, "wb") as f_out:
             shutil.copyfileobj(file.file, f_out)
             
-        # 1. Try global Cloudflare CDN
-        cdn_url = upload_to_public_cdn(target_path)
-        if cdn_url:
-            print(f"✅ Uploaded media for Buffer (CDN): {cdn_url}", flush=True)
-            return {"status": "success", "videoUrl": cdn_url}
-        
-        # 2. Fallback to direct Railway static URL with streaming headers
         domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
         if domain:
             public_url = f"https://{domain}/public/buffer_{upload_id}/{out_filename}"
         else:
             public_url = f"https://youtube-audio-backend-production-a2d5.up.railway.app/public/buffer_{upload_id}/{out_filename}"
             
-        print(f"✅ Uploaded media for Buffer (Railway fallback): {public_url} ({os.path.getsize(target_path)} bytes)", flush=True)
+        print(f"✅ Uploaded media for Buffer (Direct Railway Stream): {public_url} ({os.path.getsize(target_path)} bytes)", flush=True)
         return {"status": "success", "videoUrl": public_url}
     except Exception as e:
         print(f"❌ Failed to upload media for Buffer: {e}", flush=True)
@@ -2137,7 +2107,6 @@ async def buffer_create_post(req: BufferPostRequest):
     # Smart URL Fixer & Resolution
     video_url = req.videoUrl.strip()
     
-    # 2. If relative path, prepend current domain
     current_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
     domain_prefix = f"https://{current_domain}" if current_domain else "https://youtube-audio-backend-production-a2d5.up.railway.app"
     
@@ -2148,21 +2117,8 @@ async def buffer_create_post(req: BufferPostRequest):
         if "public/" in video_url:
             rel = "public/" + video_url.split("public/", 1)[1]
             video_url = f"{domain_prefix}/{rel}"
-            
-    # 3. If video_url is a local Railway link, attempt Cloudflare CDN upload for 100% Buffer acceptance
-    if ("/public/" in video_url) and not any(cdn in video_url for cdn in ["tmpfiles", "cloudinary"]):
-        try:
-            rel_path = video_url.split("/public/", 1)[1]
-            local_target = os.path.join(PUBLIC_DIR, rel_path)
-            if os.path.exists(local_target) and os.path.getsize(local_target) > 0:
-                cdn_link = upload_to_public_cdn(local_target)
-                if cdn_link:
-                    video_url = cdn_link
-                    print(f"🔄 Converted local Railway URL to CDN URL for Buffer: {video_url}", flush=True)
-        except Exception as cdn_err:
-            print(f"Local to CDN conversion warning: {cdn_err}", flush=True)
 
-    # 4. If video_url is an endpoint (e.g. /api/render-download) or does not end with a direct video extension, fetch and host it statically
+    # If video_url is an endpoint (e.g. /api/render-download) or does not end with a direct video extension, fetch and host it statically
     if "/api/render-download/" in video_url or not any(video_url.lower().split("?")[0].endswith(ext) for ext in [".mp4", ".mov", ".webm", ".m4v"]):
         try:
             print(f"📥 Fetching video from {video_url} to host direct static MP4 for Buffer...", flush=True)
@@ -2176,11 +2132,7 @@ async def buffer_create_post(req: BufferPostRequest):
                     for chunk in dl_res.iter_content(chunk_size=16384):
                         if chunk:
                             f_out.write(chunk)
-                cdn_link = upload_to_public_cdn(target_path)
-                if cdn_link:
-                    video_url = cdn_link
-                else:
-                    video_url = f"{domain_prefix}/public/buffer_{upload_id}/video.mp4"
+                video_url = f"{domain_prefix}/public/buffer_{upload_id}/video.mp4"
                 print(f"✅ Created direct static MP4 for Buffer: {video_url} ({os.path.getsize(target_path)} bytes)", flush=True)
         except Exception as dl_err:
             print(f"⚠️ Stream caching fallback warning: {dl_err}", flush=True)
