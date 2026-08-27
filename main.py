@@ -1656,17 +1656,29 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
     if progress_callback:
         progress_callback("🔍 جاري تحليل وتحديد المشاهد (Fast Scene Detection)...")
 
-    # 1. Fast Scene Detection with downscaling
-    try:
-        scene_list = detect(video_path, ContentDetector(threshold=27.0, min_scene_len=int(fps * 0.8)), start_in_scene=True)
-        raw_cuts = [0] + [s[1].get_frames() for s in scene_list]
-    except Exception:
-        raw_cuts = [0, total_frames]
+    # 1. Ultra-Fast Scene Detection via HSV histogram diffs on 320x180 thumbnails (< 0.2s)
+    step = max(1, int(fps * 0.4))
+    raw_cuts = [0]
+    prev_hist = None
+    for f_idx in range(0, total_frames, step):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+        ret, f_sample = cap.read()
+        if not ret or f_sample is None:
+            break
+        small_f = cv2.resize(f_sample, (320, 180))
+        hsv_f = cv2.cvtColor(small_f, cv2.COLOR_BGR2HSV)
+        hist_f = cv2.calcHist([hsv_f], [0, 1], None, [16, 16], [0, 180, 0, 256])
+        cv2.normalize(hist_f, hist_f, 0, 1, cv2.NORM_MINMAX)
+        if prev_hist is not None:
+            diff = cv2.compareHist(prev_hist, hist_f, cv2.HISTCMP_CORREL)
+            if diff < 0.60:
+                raw_cuts.append(f_idx)
+        prev_hist = hist_f
 
     if not raw_cuts or raw_cuts[-1] < total_frames:
         raw_cuts.append(total_frames)
 
-    min_len = max(int(fps * 0.5), 1)
+    min_len = max(int(fps * 0.6), 1)
     segments = []
     start = raw_cuts[0]
     for cut in raw_cuts[1:]:
@@ -1682,15 +1694,15 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
     if progress_callback:
         progress_callback(f"👥 جاري تحليل الوجوه والكاميرات لـ {len(segments)} مشهد...")
 
-    # 2. Fast sampling per scene using lightweight resized frames
+    # 2. Fast face sampling per scene using lightweight resized frames (0.1s)
     mp_face = mp.solutions.face_detection
     detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.3)
     scene_plans = []
 
     for s_idx, (start_f, end_f) in enumerate(segments):
         dur = (end_f - start_f) / fps
-        n = int(max(4, min(10, dur * 1.5)))
-        idxs = [start_f + int((end_f - start_f) * t) for t in np.linspace(0.08, 0.92, n)]
+        n = int(max(2, min(5, dur * 1.0)))
+        idxs = [start_f + int((end_f - start_f) * t) for t in np.linspace(0.15, 0.85, n)]
         
         frame_detections = []
         for idx in idxs:
@@ -1699,7 +1711,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
             if not ok or frame is None:
                 continue
             
-            small_frame = cv2.resize(frame, (640, int(640 * (H / W))))
+            small_frame = cv2.resize(frame, (480, int(480 * (H / W))))
             rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
             res = detector.process(rgb)
             
@@ -1713,6 +1725,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
                     if fw > W * 0.04:
                         current_faces.append((cx, cy))
                 if current_faces:
+                    frame_detections.append(current_faces)
                     frame_detections.append(current_faces)
 
         # Decide mode for this scene: Split (wide shot 2 speakers) or Single (1 speaker close-up/medium)
