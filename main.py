@@ -2244,10 +2244,7 @@ async def buffer_create_post(req: BufferPostRequest):
         "assets": [
             {
                 "video": {
-                    "url": video_url,
-                    "metadata": {
-                        "thumbnailOffset": 1000
-                    }
+                    "url": video_url
                 }
             }
         ]
@@ -2265,9 +2262,14 @@ async def buffer_create_post(req: BufferPostRequest):
         ... on PostActionSuccess {
           post {
             id
-            status
-            dueAt
             text
+            dueAt
+            status
+            assets {
+              id
+              mimeType
+              source
+            }
           }
         }
         ... on MutationError {
