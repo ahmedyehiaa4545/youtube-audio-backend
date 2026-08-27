@@ -2286,7 +2286,7 @@ async def buffer_create_post(req: BufferPostRequest):
     except Exception:
         pass
 
-    max_retries = 4
+    max_retries = 2
     for attempt in range(1, max_retries + 1):
         try:
             print(f"🚀 Buffer createPost attempt {attempt}/{max_retries} with video URL: {video_url}", flush=True)
@@ -2297,7 +2297,7 @@ async def buffer_create_post(req: BufferPostRequest):
                     "query": create_mutation,
                     "variables": {"input": input_payload}
                 },
-                timeout=30
+                timeout=20
             )
             if res.status_code != 200:
                 raise HTTPException(res.status_code, f"Buffer API Error: {res.text}")
@@ -2315,11 +2315,11 @@ async def buffer_create_post(req: BufferPostRequest):
             create_result = res_json.get("data", {}).get("createPost", {})
             if "message" in create_result and "post" not in create_result:
                 err_msg = create_result['message']
-                if "Video could not be read" in err_msg and attempt < max_retries:
-                    wait_sec = attempt * 3
-                    print(f"⏳ Video still propagating to Buffer edge. Waiting {wait_sec}s before retry...", flush=True)
-                    time.sleep(wait_sec)
-                    continue
+                if "Video could not be read" in err_msg:
+                    if attempt < max_retries:
+                        time.sleep(2)
+                        continue
+                    raise HTTPException(400, "سيرفرات Buffer لم تتمكن من تنزيل الفيديو من الرابط المباشر. يرجى تفعيل سحابة Cloudinary (Cloud Name + Upload Preset) من الخانة المجاورة لضمان وصول Buffer للملف في ثانية واحدة بنسبة 100%.")
 
                 if ("thumbnail" in err_msg.lower() or "metadata" in err_msg.lower()) and "metadata" in input_payload["assets"][0]["video"]:
                     input_payload["assets"][0]["video"].pop("metadata", None)
@@ -2335,13 +2335,13 @@ async def buffer_create_post(req: BufferPostRequest):
                 "data": create_result
             }
         except HTTPException as he:
-            if attempt == max_retries or "Video could not be read" not in str(he.detail):
+            if attempt == max_retries:
                 raise he
-            time.sleep(attempt * 3)
+            time.sleep(2)
         except Exception as e:
             if attempt == max_retries:
                 raise HTTPException(500, f"Failed to post to Buffer: {str(e)}")
-            time.sleep(attempt * 3)
+            time.sleep(2)
 
 @app.post("/api/buffer/posts")
 async def buffer_get_posts(payload: dict):
