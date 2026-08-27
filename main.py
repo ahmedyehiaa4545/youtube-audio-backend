@@ -1981,6 +1981,8 @@ class BufferPostRequest(BaseModel):
     publishNow: bool = False
     scheduledFor: str | None = None
     saveToDraft: bool = False
+    cloudinaryCloudName: str | None = None
+    cloudinaryUploadPreset: str | None = None
 
 @app.post("/api/buffer/channels")
 async def buffer_get_channels(payload: dict):
@@ -2064,10 +2066,10 @@ async def buffer_get_channels(payload: dict):
             raise e
         raise HTTPException(500, f"Failed to connect to Buffer: {str(e)}")
 
-def upload_to_cloudinary(file_path: str) -> str:
+def upload_to_cloudinary(file_path: str, cloud_name: str = None, preset: str = None) -> str:
     """Uploads video to Cloudinary if env variables or parameters are configured"""
-    cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME")
-    preset = os.environ.get("CLOUDINARY_UPLOAD_PRESET")
+    cloud_name = cloud_name or os.environ.get("CLOUDINARY_CLOUD_NAME")
+    preset = preset or os.environ.get("CLOUDINARY_UPLOAD_PRESET")
     api_key = os.environ.get("CLOUDINARY_API_KEY")
     api_secret = os.environ.get("CLOUDINARY_API_SECRET")
     
@@ -2095,6 +2097,8 @@ def upload_to_cloudinary(file_path: str) -> str:
                 if sec_url:
                     print(f"🌟 Cloudinary Video Upload Success: {sec_url}", flush=True)
                     return sec_url
+            else:
+                print(f"Cloudinary upload HTTP {res.status_code}: {res.text}", flush=True)
     except Exception as e:
         print(f"Cloudinary upload notice: {e}", flush=True)
     return ""
@@ -2188,8 +2192,8 @@ async def buffer_create_post(req: BufferPostRequest):
             rel = "public/" + video_url.split("public/", 1)[1]
             video_url = f"{domain_prefix}/{rel}"
 
-    cld_name = (req.cloudinaryCloudName or os.environ.get("CLOUDINARY_CLOUD_NAME") or "").strip()
-    cld_preset = (req.cloudinaryUploadPreset or os.environ.get("CLOUDINARY_UPLOAD_PRESET") or "").strip()
+    cld_name = (getattr(req, "cloudinaryCloudName", None) or os.environ.get("CLOUDINARY_CLOUD_NAME") or "").strip()
+    cld_preset = (getattr(req, "cloudinaryUploadPreset", None) or os.environ.get("CLOUDINARY_UPLOAD_PRESET") or "").strip()
 
     # If video_url is an endpoint (e.g. /api/render-download) or we have Cloudinary credentials, fetch, optimize, and upload to Cloudinary!
     if "/api/render-download/" in video_url or not any(video_url.lower().split("?")[0].endswith(ext) for ext in [".mp4", ".mov", ".webm", ".m4v"]) or (cld_name and cld_preset and not video_url.startswith("https://res.cloudinary.com")):
