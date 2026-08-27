@@ -1476,7 +1476,8 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
             '-map', '0:v', '-map', '[a]',
             '-c:v', 'copy',
-            '-c:a', 'aac', '-b:a', '192k',
+            '-c:a', 'aac', '-b:a', '192k', '-ar', '44100',
+            '-movflags', '+faststart',
             output_path
         ]
         try:
@@ -1771,7 +1772,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
                 "-vf", fast_vf,
                 *codec_args,
                 "-pix_fmt", "yuv420p",
-                "-c:a", "copy",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
                 "-movflags", "+faststart",
                 output_path
             ]
@@ -2077,6 +2078,8 @@ async def buffer_upload_media(file: UploadFile = File(...)):
         
         with open(target_path, "wb") as f_out:
             shutil.copyfileobj(file.file, f_out)
+            f_out.flush()
+            os.fsync(f_out.fileno())
             
         domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
         if domain:
@@ -2092,6 +2095,7 @@ async def buffer_upload_media(file: UploadFile = File(...)):
 
 @app.post("/api/buffer/create-post")
 async def buffer_create_post(req: BufferPostRequest):
+    import time
     api_key = req.apiKey or os.environ.get("BUFFER_API_KEY")
     if not api_key:
         raise HTTPException(400, "Buffer API Key is required.")
@@ -2132,6 +2136,8 @@ async def buffer_create_post(req: BufferPostRequest):
                     for chunk in dl_res.iter_content(chunk_size=16384):
                         if chunk:
                             f_out.write(chunk)
+                    f_out.flush()
+                    os.fsync(f_out.fileno())
                 video_url = f"{domain_prefix}/public/buffer_{upload_id}/video.mp4"
                 print(f"✅ Created direct static MP4 for Buffer: {video_url} ({os.path.getsize(target_path)} bytes)", flush=True)
         except Exception as dl_err:
@@ -2205,65 +2211,69 @@ async def buffer_create_post(req: BufferPostRequest):
     }
     """
 
+    # Warmup URL ping
     try:
-        res = requests.post(
-            "https://api.buffer.com",
-            headers=headers,
-            json={
-                "query": create_mutation,
-                "variables": {"input": input_payload}
-            },
-            timeout=30
-        )
-        if res.status_code != 200:
-            raise HTTPException(res.status_code, f"Buffer API Error: {res.text}")
+        if video_url.startswith("http"):
+            requests.head(video_url, timeout=5)
+    except Exception:
+        pass
 
-        res_json = res.json()
-        print(f"Buffer GraphQL Raw Response: {res_json}", flush=True)
+    max_retries = 4
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"🚀 Buffer createPost attempt {attempt}/{max_retries} with video URL: {video_url}", flush=True)
+            res = requests.post(
+                "https://api.buffer.com",
+                headers=headers,
+                json={
+                    "query": create_mutation,
+                    "variables": {"input": input_payload}
+                },
+                timeout=30
+            )
+            if res.status_code != 200:
+                raise HTTPException(res.status_code, f"Buffer API Error: {res.text}")
 
-        if "errors" in res_json and not res_json.get("data"):
-            err_msg = res_json['errors'][0].get('message', '')
-            if "thumbnail" in err_msg.lower() or "metadata" in err_msg.lower():
-                input_payload["assets"][0]["video"].pop("metadata", None)
-                retry_res = requests.post(
-                    "https://api.buffer.com",
-                    headers=headers,
-                    json={"query": create_mutation, "variables": {"input": input_payload}},
-                    timeout=30
-                )
-                res_json = retry_res.json()
-                print(f"Buffer Retry without metadata: {res_json}", flush=True)
-                
+            res_json = res.json()
+            print(f"Buffer GraphQL Raw Response (attempt {attempt}): {res_json}", flush=True)
+
             if "errors" in res_json and not res_json.get("data"):
-                raise HTTPException(400, f"Buffer Error: {res_json['errors'][0].get('message')}")
+                err_msg = res_json['errors'][0].get('message', '')
+                if ("thumbnail" in err_msg.lower() or "metadata" in err_msg.lower()) and "metadata" in input_payload["assets"][0]["video"]:
+                    input_payload["assets"][0]["video"].pop("metadata", None)
+                    continue
+                raise HTTPException(400, f"Buffer Error: {err_msg}")
 
-        create_result = res_json.get("data", {}).get("createPost", {})
-        if "message" in create_result and "post" not in create_result:
-            err_msg = create_result['message']
-            if ("thumbnail" in err_msg.lower() or "metadata" in err_msg.lower()) and "metadata" in input_payload["assets"][0]["video"]:
-                input_payload["assets"][0]["video"].pop("metadata", None)
-                retry_res = requests.post(
-                    "https://api.buffer.com",
-                    headers=headers,
-                    json={"query": create_mutation, "variables": {"input": input_payload}},
-                    timeout=30
-                )
-                res_json = retry_res.json()
-                create_result = res_json.get("data", {}).get("createPost", {})
-                
+            create_result = res_json.get("data", {}).get("createPost", {})
             if "message" in create_result and "post" not in create_result:
+                err_msg = create_result['message']
+                if "Video could not be read" in err_msg and attempt < max_retries:
+                    wait_sec = attempt * 3
+                    print(f"⏳ Video still propagating to Buffer edge. Waiting {wait_sec}s before retry...", flush=True)
+                    time.sleep(wait_sec)
+                    continue
+
+                if ("thumbnail" in err_msg.lower() or "metadata" in err_msg.lower()) and "metadata" in input_payload["assets"][0]["video"]:
+                    input_payload["assets"][0]["video"].pop("metadata", None)
+                    continue
+
                 raise HTTPException(400, f"Buffer Mutation Error: {create_result['message']}")
 
-        action_msg = "تم نشر الفيديو فوراً على حسابك بنجاح!" if req.publishNow else ("تمت جدولة الفيديو في الموعد المحدد بنجاح!" if req.scheduledFor else "تمت إضافة الفيديو إلى طابور النشر (Queue) بنجاح!")
-        return {
-            "status": "success",
-            "message": action_msg,
-            "data": create_result
-        }
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(500, f"Failed to post to Buffer: {str(e)}")
+            # Succeeded!
+            action_msg = "تم نشر الفيديو فوراً على حسابك بنجاح!" if req.publishNow else ("تمت جدولة الفيديو في الموعد المحدد بنجاح!" if req.scheduledFor else "تمت إضافة الفيديو إلى طابور النشر (Queue) بنجاح!")
+            return {
+                "status": "success",
+                "message": action_msg,
+                "data": create_result
+            }
+        except HTTPException as he:
+            if attempt == max_retries or "Video could not be read" not in str(he.detail):
+                raise he
+            time.sleep(attempt * 3)
+        except Exception as e:
+            if attempt == max_retries:
+                raise HTTPException(500, f"Failed to post to Buffer: {str(e)}")
+            time.sleep(attempt * 3)
 
 @app.post("/api/buffer/posts")
 async def buffer_get_posts(payload: dict):
