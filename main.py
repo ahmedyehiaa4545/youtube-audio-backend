@@ -146,6 +146,7 @@ class SuggestShortsRequest(BaseModel):
     customPrompt: str | None = None
     titleStyle: str | None = "auto"
     numShorts: int = 3
+    sourceTitle: str | None = None
 
 class CutRequest(BaseModel):
     url: str
@@ -410,9 +411,10 @@ def extract_video_id(url: str) -> str | None:
     match = re.search(pattern, url)
     return match.group(1) if match else None
 
-def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None) -> str:
+def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None) -> tuple[str, str]:
     """
     تحميل الصوت مباشرة وسريعاً من يوتيوب عبر مكتبة yt_dlp الأصلية مع عملاء البث المعتمدين والكوكيز
+    واستخراج عنوان الحلقة الأصلي لتوثيق المصدر.
     """
     import yt_dlp
 
@@ -424,6 +426,7 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
     print(f"⚡ Downloading audio directly via yt-dlp for {youtube_url}...", flush=True)
 
     output_base = output_path.replace(".mp3", "")
+    video_title = ""
 
     # إعدادات السحب الأصلية المعززة بعملاء البث والكوكيز
     opts = {
@@ -446,14 +449,16 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
 
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([youtube_url])
+            info = ydl.extract_info(youtube_url, download=True)
+            if info:
+                video_title = info.get("title", "")
     except Exception as ydl_err:
         print(f"⚠️ Primary yt_dlp download notice: {ydl_err}", flush=True)
 
     # التحقق من وجود ملف الـ MP3 الناتج
     if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-        print(f"🎉 Audio extracted successfully: {output_path} ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
-        return output_path
+        print(f"🎉 Audio extracted successfully: {output_path} ({os.path.getsize(output_path)/(1024*1024):.2f}MB) [Title: {video_title}]", flush=True)
+        return output_path, video_title
 
     # البحث عن أي ملف صوتي تم إنشاؤه في المجلد
     parent_dir = os.path.dirname(output_path)
@@ -464,8 +469,8 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
             if found_path != output_path:
                 try: os.rename(found_path, output_path)
                 except: pass
-            print(f"🎉 Audio extracted successfully: {output_path}", flush=True)
-            return output_path
+            print(f"🎉 Audio extracted successfully: {output_path} [Title: {video_title}]", flush=True)
+            return output_path, video_title
 
     raise Exception("فشل استخراج ملف الصوت من يوتيوب. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
 
@@ -773,7 +778,7 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
         
         print(f"[{task_id}] Background: Downloading YouTube audio smartly...", flush=True)
         TASKS[task_id]["progress"] = "📥 جاري تحميل صوت اليوتيوب..."
-        download_audio_smart(youtube_url, audio_path, task_id=task_id)
+        audio_path, video_title = download_audio_smart(youtube_url, audio_path, task_id=task_id)
         
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
             raise Exception("فشل تحميل ملف الصوت من السيرفر.")
@@ -800,6 +805,7 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
             "status": "success",
             "progress": "اكتمل بنجاح!",
             "audioUrl": f"public/temp_{task_id}/audio.mp3",
+            "videoTitle": video_title,
             "transcription": transcription_text
         })
         
@@ -1176,7 +1182,9 @@ async def suggest_shorts(req: SuggestShortsRequest):
         s["end_time"] = snapped_end
         s["category"] = s.get("category") or "🎯 قصة وخلاصة مكتملة"
 
-        s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
+        clean_t = enforce_title_style(s.get("title", ""), req.titleStyle)
+        s["title"] = clean_t
+        s["pure_title"] = clean_t
         s["script"] = rebuild_script_for_short(
             transcription=req.transcription,
             start_time=s["start_time"],
@@ -1184,6 +1192,8 @@ async def suggest_shorts(req: SuggestShortsRequest):
             fallback_script=s.get("script", "")
         )
         s["hook"] = extract_single_sentence_hook(s.get("script", ""))
+        s["summary"] = extract_two_sentence_summary(s.get("script", ""))
+        s["source_title"] = req.sourceTitle or ""
 
     return {
         "status": "success",
@@ -1260,7 +1270,9 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
             s["end_time"] = snapped_end
             s["category"] = s.get("category") or "🎯 قصة وخلاصة مكتملة"
 
-            s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
+            clean_t = enforce_title_style(s.get("title", ""), req.titleStyle)
+            s["title"] = clean_t
+            s["pure_title"] = clean_t
 
             s["script"] = rebuild_script_for_short(
                 transcription=req.transcription,
@@ -1270,6 +1282,8 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
             )
 
             s["hook"] = extract_single_sentence_hook(s.get("script", ""))
+            s["summary"] = extract_two_sentence_summary(s.get("script", ""))
+            s["source_title"] = req.sourceTitle or ""
 
         TASKS[task_id] = {
             "status": "success",
@@ -1754,7 +1768,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
     except Exception:
         pass
 
-    codec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"] if has_gpu else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-profile:v", "main", "-threads", "0"]
+    codec_args = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "20"] if has_gpu else ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "fastdecode", "-crf", "20", "-profile:v", "main", "-threads", "0"]
 
     if progress_callback:
         progress_callback("⚡ جاري اقتصاص ورندرة الفيديو طولي (9:16) فائق السرعة عبر محرك FFmpeg المباشر...")
