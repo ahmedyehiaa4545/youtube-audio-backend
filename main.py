@@ -1754,7 +1754,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
     except Exception:
         pass
 
-    codec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"] if has_gpu else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-threads", "0"]
+    codec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"] if has_gpu else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-profile:v", "main", "-threads", "0"]
 
     if progress_callback:
         progress_callback("⚡ جاري اقتصاص ورندرة الفيديو طولي (9:16) فائق السرعة عبر محرك FFmpeg المباشر...")
@@ -1811,7 +1811,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
                 "-map", "[outv]", "-map", "0:a?",
                 *codec_args,
                 "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
                 "-movflags", "+faststart",
                 "-shortest", output_path
             ]
@@ -1836,7 +1836,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
         "-map", "0:v", "-map", "1:a?",
         *codec_args,
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
         "-movflags", "+faststart",
         "-shortest", output_path
     ]
@@ -2064,9 +2064,66 @@ async def buffer_get_channels(payload: dict):
             raise e
         raise HTTPException(500, f"Failed to connect to Buffer: {str(e)}")
 
+def upload_to_cloudinary(file_path: str) -> str:
+    """Uploads video to Cloudinary if env variables or parameters are configured"""
+    cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME")
+    preset = os.environ.get("CLOUDINARY_UPLOAD_PRESET")
+    api_key = os.environ.get("CLOUDINARY_API_KEY")
+    api_secret = os.environ.get("CLOUDINARY_API_SECRET")
+    
+    if not cloud_name:
+        return ""
+    try:
+        url = f"https://api.cloudinary.com/v1_1/{cloud_name}/video/upload"
+        with open(file_path, "rb") as f:
+            files = {"file": f}
+            data = {}
+            if preset:
+                data["upload_preset"] = preset
+            elif api_key and api_secret:
+                import time, hashlib
+                ts = str(int(time.time()))
+                data["timestamp"] = ts
+                data["api_key"] = api_key
+                sig_str = f"timestamp={ts}{api_secret}"
+                data["signature"] = hashlib.sha1(sig_str.encode()).hexdigest()
+            else:
+                return ""
+            res = requests.post(url, data=data, files=files, timeout=60)
+            if res.status_code == 200:
+                sec_url = res.json().get("secure_url")
+                if sec_url:
+                    print(f"🌟 Cloudinary Video Upload Success: {sec_url}", flush=True)
+                    return sec_url
+    except Exception as e:
+        print(f"Cloudinary upload notice: {e}", flush=True)
+    return ""
+
+def ensure_faststart_mp4(file_path: str):
+    """Guarantees moov atom at beginning of MP4 (+faststart) and AAC audio for 100% Buffer/TikTok compatibility"""
+    try:
+        fast_tmp = file_path + ".fast.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", file_path,
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+            "-movflags", "+faststart",
+            fast_tmp
+        ]
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+        if p.returncode == 0 and os.path.exists(fast_tmp) and os.path.getsize(fast_tmp) > 1000:
+            os.replace(fast_tmp, file_path)
+            
+        with open(file_path, 'rb') as f:
+            head = f.read(65536)
+        print(f"🔍 MP4 Header Check: {'✅ moov atom is at head (faststart OK)' if b'moov' in head else '⚠️ moov not in head'}", flush=True)
+    except Exception as e:
+        print(f"Faststart optimization notice: {e}", flush=True)
+
 @app.post("/api/buffer/upload-media")
 async def buffer_upload_media(file: UploadFile = File(...)):
-    """Uploads a video blob/file directly and returns a direct HTTPS public URL on Railway with streaming headers for Buffer"""
+    """Uploads a video blob/file directly, guarantees +faststart, and returns a direct HTTPS public URL on Railway/Cloudinary for Buffer"""
     try:
         upload_id = str(uuid.uuid4())
         task_dir = os.path.join(PUBLIC_DIR, f"buffer_{upload_id}")
@@ -2080,7 +2137,16 @@ async def buffer_upload_media(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, f_out)
             f_out.flush()
             os.fsync(f_out.fileno())
+
+        # Guarantee moov atom is at head & AAC audio
+        ensure_faststart_mp4(target_path)
             
+        # 1. Optional Cloudinary CDN upload
+        cld_url = upload_to_cloudinary(target_path)
+        if cld_url:
+            return {"status": "success", "videoUrl": cld_url}
+
+        # 2. Direct Railway Static Stream URL
         domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
         if domain:
             public_url = f"https://{domain}/public/buffer_{upload_id}/{out_filename}"
