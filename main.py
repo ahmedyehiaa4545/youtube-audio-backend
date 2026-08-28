@@ -1727,10 +1727,14 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
     except Exception:
         pass
 
-    codec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"] if has_gpu else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-threads", "0"]
+    codec_args = (
+        ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "20", "-b:v", "3500k", "-maxrate", "4500k", "-bufsize", "7000k"]
+        if has_gpu
+        else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "4", "-b:v", "3500k", "-maxrate", "4500k", "-bufsize", "7000k"]
+    )
 
     if progress_callback:
-        progress_callback("⚡ جاري اقتصاص ورندرة الفيديو طولي (9:16) فائق السرعة عبر محرك FFmpeg المباشر...")
+        progress_callback("⚡ جاري اقتصاص ورندرة الفيديو طولي (9:16) فائق السرعة عبر محرك FFmpeg (4 Threads)...")
 
     # محاولة الرندر المباشر فائق السرعة عبر FFmpeg Native Filter (يوفر 80% من الوقت مع الحفاظ التام على جودة 1080p)
     ffmpeg_native_success = False
@@ -1741,11 +1745,12 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
             fast_vf = f"crop={tw}:{H}:{x1}:0,scale={out_w}:{out_h}"
             fast_cmd = [
                 "ffmpeg", "-y",
+                "-threads", "4",
                 "-i", video_path,
                 "-vf", fast_vf,
                 *codec_args,
                 "-pix_fmt", "yuv420p",
-                "-c:a", "copy",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
                 "-movflags", "+faststart",
                 output_path
             ]
@@ -1779,12 +1784,13 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
             fc_string = ";".join(filter_parts) + ";" + "".join(concat_inputs) + f"concat=n={len(concat_inputs)}:v=1:a=0[outv]"
             fast_cmd = [
                 "ffmpeg", "-y",
+                "-threads", "4",
                 "-i", video_path,
                 "-filter_complex", fc_string,
                 "-map", "[outv]", "-map", "0:a?",
                 *codec_args,
                 "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
+                "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
                 "-movflags", "+faststart",
                 "-shortest", output_path
             ]
@@ -1802,6 +1808,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
     # 4. Fallback Frame Pipeline (إذا لزم الأمر كإجراء احتياطي)
     cmd = [
         "ffmpeg", "-y",
+        "-threads", "4",
         "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-s", f"{out_w}x{out_h}", "-r", str(fps),
         "-i", "-",
@@ -1809,7 +1816,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
         "-map", "0:v", "-map", "1:a?",
         *codec_args,
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
         "-movflags", "+faststart",
         "-shortest", output_path
     ]
@@ -1941,153 +1948,5 @@ async def convert_vertical_async(
     background_tasks.add_task(run_convert_vertical_background, task_id, video_path, youtubeUrl, task_dir)
 
     return {"status": "processing", "taskId": task_id}
-
-
-class BufferChannelsProxyReq(BaseModel):
-    token: str
-
-class BufferPublishProxyReq(BaseModel):
-    token: str
-    channel_id: str
-    text: str = ""
-    video_url: str
-    scheduled_at: str | None = None
-    is_now: bool = True
-
-@app.post("/api/buffer/channels")
-def buffer_channels_proxy(req: BufferChannelsProxyReq):
-    if not req.token:
-        raise HTTPException(status_code=400, detail="Buffer token is required")
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {req.token.strip()}"
-    }
-    
-    org_query = """
-    query {
-      account {
-        id
-        organizations {
-          id
-          name
-        }
-      }
-    }
-    """
-    try:
-        res = requests.post(
-            "https://api.buffer.com",
-            headers=headers,
-            json={"query": org_query},
-            timeout=25
-        )
-        data = res.json()
-        if "errors" in data and len(data["errors"]) > 0:
-            return {"channels": [], "error": data["errors"][0].get("message", "Buffer API error")}
-
-        orgs = data.get("data", {}).get("account", {}).get("organizations", [])
-        if not orgs:
-            return {"channels": [], "error": "لم يتم العثور على أي منظمة في حساب Buffer."}
-
-        all_channels = []
-        chan_query = """
-        query GetChannels($input: ChannelsInput!) {
-          channels(input: $input) {
-            id
-            name
-            displayName
-            service
-            avatar
-          }
-        }
-        """
-        for org in orgs:
-            org_id = org.get("id")
-            org_name = org.get("name", "Buffer Org")
-            if not org_id:
-                continue
-            c_res = requests.post(
-                "https://api.buffer.com",
-                headers=headers,
-                json={"query": chan_query, "variables": {"input": {"organizationId": org_id}}},
-                timeout=25
-            )
-            c_data = c_res.json()
-            ch_list = c_data.get("data", {}).get("channels", [])
-            for ch in ch_list:
-                all_channels.append({
-                    "id": ch.get("id"),
-                    "name": ch.get("name") or ch.get("displayName") or "TikTok Channel",
-                    "displayName": ch.get("displayName") or ch.get("name"),
-                    "service": ch.get("service") or "tiktok",
-                    "avatar": ch.get("avatar") or "",
-                    "organizationName": org_name
-                })
-        
-        return {"channels": all_channels, "status": "success"}
-    except Exception as e:
-        return {"channels": [], "error": str(e)}
-
-@app.post("/api/buffer/publish")
-def buffer_publish_proxy(req: BufferPublishProxyReq):
-    if not req.token or not req.channel_id or not req.video_url:
-        raise HTTPException(status_code=400, detail="Missing required parameters")
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {req.token.strip()}"
-    }
-
-    mutation = """
-    mutation CreatePost($input: CreatePostInput!) {
-      createPost(input: $input) {
-        ... on PostActionSuccess {
-          post {
-            id
-            dueAt
-            status
-            text
-          }
-        }
-        ... on MutationError {
-          message
-        }
-      }
-    }
-    """
-    input_payload = {
-        "channelId": req.channel_id.strip(),
-        "text": req.text,
-        "schedulingType": "automatic",
-        "mode": "shareNow" if req.is_now else "customScheduled",
-        "assets": [
-            {
-                "video": {
-                    "url": req.video_url
-                }
-            }
-        ]
-    }
-    if not req.is_now and req.scheduled_at:
-        input_payload["dueAt"] = req.scheduled_at
-
-    try:
-        res = requests.post(
-            "https://api.buffer.com",
-            headers=headers,
-            json={"query": mutation, "variables": {"input": input_payload}},
-            timeout=30
-        )
-        data = res.json()
-        if "errors" in data and len(data["errors"]) > 0:
-            return {"status": "error", "error": data["errors"][0].get("message", "Buffer mutation error")}
-        
-        post_data = data.get("data", {}).get("createPost", {})
-        if "message" in post_data:
-            return {"status": "error", "error": post_data["message"]}
-        
-        return {"status": "success", "post": post_data.get("post", {})}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
