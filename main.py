@@ -36,33 +36,7 @@ TEMP_DIR = os.path.abspath("temp")
 os.makedirs(PUBLIC_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-@app.api_route("/public/{file_path:path}", methods=["GET", "HEAD", "OPTIONS"])
-async def serve_public_media(file_path: str):
-    full_path = os.path.abspath(os.path.join(PUBLIC_DIR, file_path))
-    if not os.path.exists(full_path) or not full_path.startswith(PUBLIC_DIR):
-        raise HTTPException(status_code=404, detail="Media file not found")
-    
-    file_size = os.path.getsize(full_path)
-    file_ext = os.path.splitext(full_path)[1].lower()
-    media_type = "video/mp4" if file_ext == ".mp4" else ("audio/mpeg" if file_ext == ".mp3" else "application/octet-stream")
-    
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(file_size),
-        "Content-Type": media_type,
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-        "Access-Control-Allow-Headers": "*",
-        "Cache-Control": "public, max-age=604800",
-    }
-    
-    return FileResponse(
-        full_path,
-        media_type=media_type,
-        headers=headers
-    )
-
-# Mount public folder as fallback
+# Mount public folder to serve downloaded audio files statically
 app.mount("/public", StaticFiles(directory=PUBLIC_DIR), name="public")
 
 COOKIE_FILE_PATH = "/tmp/cookies.txt"
@@ -146,7 +120,6 @@ class SuggestShortsRequest(BaseModel):
     customPrompt: str | None = None
     titleStyle: str | None = "auto"
     numShorts: int = 3
-    sourceTitle: str | None = None
 
 class CutRequest(BaseModel):
     url: str
@@ -411,10 +384,9 @@ def extract_video_id(url: str) -> str | None:
     match = re.search(pattern, url)
     return match.group(1) if match else None
 
-def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None) -> tuple[str, str]:
+def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None) -> str:
     """
     تحميل الصوت مباشرة وسريعاً من يوتيوب عبر مكتبة yt_dlp الأصلية مع عملاء البث المعتمدين والكوكيز
-    واستخراج عنوان الحلقة الأصلي لتوثيق المصدر.
     """
     import yt_dlp
 
@@ -426,7 +398,6 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
     print(f"⚡ Downloading audio directly via yt-dlp for {youtube_url}...", flush=True)
 
     output_base = output_path.replace(".mp3", "")
-    video_title = ""
 
     # إعدادات السحب الأصلية المعززة بعملاء البث والكوكيز
     opts = {
@@ -449,16 +420,14 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
 
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=True)
-            if info:
-                video_title = info.get("title", "")
+            ydl.download([youtube_url])
     except Exception as ydl_err:
         print(f"⚠️ Primary yt_dlp download notice: {ydl_err}", flush=True)
 
     # التحقق من وجود ملف الـ MP3 الناتج
     if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-        print(f"🎉 Audio extracted successfully: {output_path} ({os.path.getsize(output_path)/(1024*1024):.2f}MB) [Title: {video_title}]", flush=True)
-        return output_path, video_title
+        print(f"🎉 Audio extracted successfully: {output_path} ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
+        return output_path
 
     # البحث عن أي ملف صوتي تم إنشاؤه في المجلد
     parent_dir = os.path.dirname(output_path)
@@ -469,8 +438,8 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
             if found_path != output_path:
                 try: os.rename(found_path, output_path)
                 except: pass
-            print(f"🎉 Audio extracted successfully: {output_path} [Title: {video_title}]", flush=True)
-            return output_path, video_title
+            print(f"🎉 Audio extracted successfully: {output_path}", flush=True)
+            return output_path
 
     raise Exception("فشل استخراج ملف الصوت من يوتيوب. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
 
@@ -750,8 +719,8 @@ def clean_temp_dir(path: str):
         except Exception as e:
             print(f"Error cleaning up {path}: {e}", flush=True)
 
-async def schedule_dir_cleanup(path: str, delay_seconds: int = 172800):
-    """Wait for 48 hours (172800s) then delete the temp folder so scheduled Buffer posts succeed"""
+async def schedule_dir_cleanup(path: str, delay_seconds: int = 600):
+    """Wait for some time then delete the temp folder (e.g. 10 minutes)"""
     await asyncio.sleep(delay_seconds)
     clean_temp_dir(path)
 
@@ -778,7 +747,7 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
         
         print(f"[{task_id}] Background: Downloading YouTube audio smartly...", flush=True)
         TASKS[task_id]["progress"] = "📥 جاري تحميل صوت اليوتيوب..."
-        audio_path, video_title = download_audio_smart(youtube_url, audio_path, task_id=task_id)
+        download_audio_smart(youtube_url, audio_path, task_id=task_id)
         
         if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
             raise Exception("فشل تحميل ملف الصوت من السيرفر.")
@@ -805,7 +774,6 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
             "status": "success",
             "progress": "اكتمل بنجاح!",
             "audioUrl": f"public/temp_{task_id}/audio.mp3",
-            "videoTitle": video_title,
             "transcription": transcription_text
         })
         
@@ -847,7 +815,7 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
         task_dir
     )
     
-    background_tasks.add_task(schedule_dir_cleanup, task_dir, 172800)
+    background_tasks.add_task(schedule_dir_cleanup, task_dir, 1200)
     
     return {
         "status": "queued",
@@ -882,8 +850,8 @@ async def transcribe_gemini(req: DownloadRequest, background_tasks: BackgroundTa
         task_dir
     )
     
-    # Schedule cleanup in the background after 48 hours to preserve for scheduler
-    background_tasks.add_task(schedule_dir_cleanup, task_dir, 172800)
+    # Schedule cleanup in the background after 20 minutes to save disk space
+    background_tasks.add_task(schedule_dir_cleanup, task_dir, 1200)
     
     return {
         "status": "queued",
@@ -1182,9 +1150,7 @@ async def suggest_shorts(req: SuggestShortsRequest):
         s["end_time"] = snapped_end
         s["category"] = s.get("category") or "🎯 قصة وخلاصة مكتملة"
 
-        clean_t = enforce_title_style(s.get("title", ""), req.titleStyle)
-        s["title"] = clean_t
-        s["pure_title"] = clean_t
+        s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
         s["script"] = rebuild_script_for_short(
             transcription=req.transcription,
             start_time=s["start_time"],
@@ -1192,8 +1158,6 @@ async def suggest_shorts(req: SuggestShortsRequest):
             fallback_script=s.get("script", "")
         )
         s["hook"] = extract_single_sentence_hook(s.get("script", ""))
-        s["summary"] = extract_two_sentence_summary(s.get("script", ""))
-        s["source_title"] = req.sourceTitle or ""
 
     return {
         "status": "success",
@@ -1270,9 +1234,7 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
             s["end_time"] = snapped_end
             s["category"] = s.get("category") or "🎯 قصة وخلاصة مكتملة"
 
-            clean_t = enforce_title_style(s.get("title", ""), req.titleStyle)
-            s["title"] = clean_t
-            s["pure_title"] = clean_t
+            s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
 
             s["script"] = rebuild_script_for_short(
                 transcription=req.transcription,
@@ -1282,8 +1244,6 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
             )
 
             s["hook"] = extract_single_sentence_hook(s.get("script", ""))
-            s["summary"] = extract_two_sentence_summary(s.get("script", ""))
-            s["source_title"] = req.sourceTitle or ""
 
         TASKS[task_id] = {
             "status": "success",
@@ -1490,8 +1450,7 @@ def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, o
             '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
             '-map', '0:v', '-map', '[a]',
             '-c:v', 'copy',
-            '-c:a', 'aac', '-b:a', '192k', '-ar', '44100',
-            '-movflags', '+faststart',
+            '-c:a', 'aac', '-b:a', '192k',
             output_path
         ]
         try:
@@ -1656,29 +1615,17 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
     if progress_callback:
         progress_callback("🔍 جاري تحليل وتحديد المشاهد (Fast Scene Detection)...")
 
-    # 1. Ultra-Fast Scene Detection via HSV histogram diffs on 320x180 thumbnails (< 0.2s)
-    step = max(1, int(fps * 0.4))
-    raw_cuts = [0]
-    prev_hist = None
-    for f_idx in range(0, total_frames, step):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-        ret, f_sample = cap.read()
-        if not ret or f_sample is None:
-            break
-        small_f = cv2.resize(f_sample, (320, 180))
-        hsv_f = cv2.cvtColor(small_f, cv2.COLOR_BGR2HSV)
-        hist_f = cv2.calcHist([hsv_f], [0, 1], None, [16, 16], [0, 180, 0, 256])
-        cv2.normalize(hist_f, hist_f, 0, 1, cv2.NORM_MINMAX)
-        if prev_hist is not None:
-            diff = cv2.compareHist(prev_hist, hist_f, cv2.HISTCMP_CORREL)
-            if diff < 0.60:
-                raw_cuts.append(f_idx)
-        prev_hist = hist_f
+    # 1. Fast Scene Detection with downscaling
+    try:
+        scene_list = detect(video_path, ContentDetector(threshold=27.0, min_scene_len=int(fps * 0.8)), start_in_scene=True)
+        raw_cuts = [0] + [s[1].get_frames() for s in scene_list]
+    except Exception:
+        raw_cuts = [0, total_frames]
 
     if not raw_cuts or raw_cuts[-1] < total_frames:
         raw_cuts.append(total_frames)
 
-    min_len = max(int(fps * 0.6), 1)
+    min_len = max(int(fps * 0.5), 1)
     segments = []
     start = raw_cuts[0]
     for cut in raw_cuts[1:]:
@@ -1694,15 +1641,15 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
     if progress_callback:
         progress_callback(f"👥 جاري تحليل الوجوه والكاميرات لـ {len(segments)} مشهد...")
 
-    # 2. Fast face sampling per scene using lightweight resized frames (0.1s)
+    # 2. Fast sampling per scene using lightweight resized frames
     mp_face = mp.solutions.face_detection
     detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.3)
     scene_plans = []
 
     for s_idx, (start_f, end_f) in enumerate(segments):
         dur = (end_f - start_f) / fps
-        n = int(max(2, min(5, dur * 1.0)))
-        idxs = [start_f + int((end_f - start_f) * t) for t in np.linspace(0.15, 0.85, n)]
+        n = int(max(4, min(10, dur * 1.5)))
+        idxs = [start_f + int((end_f - start_f) * t) for t in np.linspace(0.08, 0.92, n)]
         
         frame_detections = []
         for idx in idxs:
@@ -1711,7 +1658,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
             if not ok or frame is None:
                 continue
             
-            small_frame = cv2.resize(frame, (480, int(480 * (H / W))))
+            small_frame = cv2.resize(frame, (640, int(640 * (H / W))))
             rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
             res = detector.process(rgb)
             
@@ -1725,7 +1672,6 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
                     if fw > W * 0.04:
                         current_faces.append((cx, cy))
                 if current_faces:
-                    frame_detections.append(current_faces)
                     frame_detections.append(current_faces)
 
         # Decide mode for this scene: Split (wide shot 2 speakers) or Single (1 speaker close-up/medium)
@@ -1781,7 +1727,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
     except Exception:
         pass
 
-    codec_args = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "20"] if has_gpu else ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "fastdecode", "-crf", "20", "-profile:v", "main", "-threads", "0"]
+    codec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"] if has_gpu else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-threads", "0"]
 
     if progress_callback:
         progress_callback("⚡ جاري اقتصاص ورندرة الفيديو طولي (9:16) فائق السرعة عبر محرك FFmpeg المباشر...")
@@ -1799,7 +1745,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
                 "-vf", fast_vf,
                 *codec_args,
                 "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                "-c:a", "copy",
                 "-movflags", "+faststart",
                 output_path
             ]
@@ -1838,7 +1784,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
                 "-map", "[outv]", "-map", "0:a?",
                 *codec_args,
                 "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+                "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart",
                 "-shortest", output_path
             ]
@@ -1863,7 +1809,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
         "-map", "0:v", "-map", "1:a?",
         *codec_args,
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
+        "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         "-shortest", output_path
     ]
@@ -1995,460 +1941,5 @@ async def convert_vertical_async(
     background_tasks.add_task(run_convert_vertical_background, task_id, video_path, youtubeUrl, task_dir)
 
     return {"status": "processing", "taskId": task_id}
-
-
-# ==================== Buffer Social Media & TikTok Publishing API ====================
-
-class BufferPostRequest(BaseModel):
-    apiKey: str
-    channelId: str | None = None
-    organizationId: str | None = None
-    content: str
-    videoUrl: str
-    publishNow: bool = False
-    scheduledFor: str | None = None
-    saveToDraft: bool = False
-    cloudinaryCloudName: str | None = None
-    cloudinaryUploadPreset: str | None = None
-
-@app.post("/api/buffer/channels")
-async def buffer_get_channels(payload: dict):
-    api_key = payload.get("apiKey") or os.environ.get("BUFFER_API_KEY")
-    if not api_key:
-        raise HTTPException(400, "Buffer API Key is required.")
-    
-    headers = {
-        "Authorization": f"Bearer {api_key.strip()}",
-        "Content-Type": "application/json"
-    }
-
-    account_query = """
-    query GetAccountAndOrgs {
-      account {
-        id
-        email
-        organizations {
-          id
-          name
-        }
-      }
-    }
-    """
-    try:
-        res = requests.post(
-            "https://api.buffer.com",
-            headers=headers,
-            json={"query": account_query},
-            timeout=20
-        )
-        if res.status_code != 200:
-            raise HTTPException(res.status_code, f"Buffer API Error: {res.text}")
-        
-        data = res.json()
-        if "errors" in data and not data.get("data"):
-            raise HTTPException(400, f"Buffer GraphQL Error: {data['errors'][0].get('message')}")
-        
-        account_data = data.get("data", {}).get("account", {})
-        organizations = account_data.get("organizations", [])
-        
-        all_channels = []
-        for org in organizations:
-            org_id = org.get("id")
-            if not org_id:
-                continue
-            channels_query = """
-            query GetChannels($input: ChannelsInput!) {
-              channels(input: $input) {
-                id
-                name
-                service
-                displayName
-                avatar
-              }
-            }
-            """
-            c_res = requests.post(
-                "https://api.buffer.com",
-                headers=headers,
-                json={
-                    "query": channels_query,
-                    "variables": {"input": {"organizationId": org_id}}
-                },
-                timeout=20
-            )
-            if c_res.status_code == 200:
-                c_data = c_res.json()
-                ch_list = c_data.get("data", {}).get("channels", [])
-                for ch in ch_list:
-                    ch["organizationId"] = org_id
-                    ch["orgName"] = org.get("name")
-                    all_channels.append(ch)
-
-        return {
-            "account": account_data,
-            "channels": all_channels
-        }
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(500, f"Failed to connect to Buffer: {str(e)}")
-
-def upload_to_cloudinary(file_path: str, cloud_name: str = None, preset: str = None) -> str:
-    """Uploads video to Cloudinary if env variables or parameters are configured"""
-    cloud_name = cloud_name or os.environ.get("CLOUDINARY_CLOUD_NAME")
-    preset = preset or os.environ.get("CLOUDINARY_UPLOAD_PRESET")
-    api_key = os.environ.get("CLOUDINARY_API_KEY")
-    api_secret = os.environ.get("CLOUDINARY_API_SECRET")
-    
-    if not cloud_name:
-        return ""
-    try:
-        url = f"https://api.cloudinary.com/v1_1/{cloud_name}/video/upload"
-        with open(file_path, "rb") as f:
-            files = {"file": f}
-            data = {}
-            if preset:
-                data["upload_preset"] = preset
-            elif api_key and api_secret:
-                import time, hashlib
-                ts = str(int(time.time()))
-                data["timestamp"] = ts
-                data["api_key"] = api_key
-                sig_str = f"timestamp={ts}{api_secret}"
-                data["signature"] = hashlib.sha1(sig_str.encode()).hexdigest()
-            else:
-                return ""
-            res = requests.post(url, data=data, files=files, timeout=60)
-            if res.status_code == 200:
-                sec_url = res.json().get("secure_url")
-                if sec_url:
-                    print(f"🌟 Cloudinary Video Upload Success: {sec_url}", flush=True)
-                    return sec_url
-            else:
-                print(f"Cloudinary upload HTTP {res.status_code}: {res.text}", flush=True)
-    except Exception as e:
-        print(f"Cloudinary upload notice: {e}", flush=True)
-    return ""
-
-def ensure_faststart_mp4(file_path: str):
-    """Guarantees moov atom at beginning of MP4 (+faststart) and AAC audio for 100% Buffer/TikTok compatibility"""
-    try:
-        fast_tmp = file_path + ".fast.mp4"
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", file_path,
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100",
-            "-movflags", "+faststart",
-            fast_tmp
-        ]
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
-        if p.returncode == 0 and os.path.exists(fast_tmp) and os.path.getsize(fast_tmp) > 1000:
-            os.replace(fast_tmp, file_path)
-            
-        with open(file_path, 'rb') as f:
-            head = f.read(65536)
-        print(f"🔍 MP4 Header Check: {'✅ moov atom is at head (faststart OK)' if b'moov' in head else '⚠️ moov not in head'}", flush=True)
-    except Exception as e:
-        print(f"Faststart optimization notice: {e}", flush=True)
-
-@app.post("/api/buffer/upload-media")
-async def buffer_upload_media(file: UploadFile = File(...)):
-    """Uploads a video blob/file directly, guarantees +faststart, and returns a direct HTTPS public URL on Railway/Cloudinary for Buffer"""
-    try:
-        upload_id = str(uuid.uuid4())
-        task_dir = os.path.join(PUBLIC_DIR, f"buffer_{upload_id}")
-        os.makedirs(task_dir, exist_ok=True)
-        
-        file_ext = os.path.splitext(file.filename or "")[1] or ".mp4"
-        out_filename = f"video{file_ext}"
-        target_path = os.path.join(task_dir, out_filename)
-        
-        with open(target_path, "wb") as f_out:
-            shutil.copyfileobj(file.file, f_out)
-            f_out.flush()
-            os.fsync(f_out.fileno())
-
-        # Guarantee moov atom is at head & AAC audio
-        ensure_faststart_mp4(target_path)
-            
-        # 1. Optional Cloudinary CDN upload
-        cld_url = upload_to_cloudinary(target_path)
-        if cld_url:
-            return {"status": "success", "videoUrl": cld_url}
-
-        # 2. Direct Railway Static Stream URL
-        domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
-        if domain:
-            public_url = f"https://{domain}/public/buffer_{upload_id}/{out_filename}"
-        else:
-            public_url = f"https://youtube-audio-backend-production-a2d5.up.railway.app/public/buffer_{upload_id}/{out_filename}"
-            
-        print(f"✅ Uploaded media for Buffer (Direct Railway Stream): {public_url} ({os.path.getsize(target_path)} bytes)", flush=True)
-        return {"status": "success", "videoUrl": public_url}
-    except Exception as e:
-        print(f"❌ Failed to upload media for Buffer: {e}", flush=True)
-        raise HTTPException(status_code=500, detail=f"Failed to upload media: {str(e)}")
-
-@app.post("/api/buffer/create-post")
-async def buffer_create_post(req: BufferPostRequest):
-    import time
-    api_key = req.apiKey or os.environ.get("BUFFER_API_KEY")
-    if not api_key:
-        raise HTTPException(400, "Buffer API Key is required.")
-    
-    if not req.videoUrl:
-        raise HTTPException(400, "Video URL is required for Buffer posting.")
-
-    headers = {
-        "Authorization": f"Bearer {api_key.strip()}",
-        "Content-Type": "application/json"
-    }
-
-    # Smart URL Fixer & Resolution
-    video_url = req.videoUrl.strip()
-    
-    current_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
-    domain_prefix = f"https://{current_domain}" if current_domain else "https://youtube-audio-backend-production-a2d5.up.railway.app"
-    
-    if video_url.startswith("public/") or video_url.startswith("/public/"):
-        rel = video_url.lstrip("/")
-        video_url = f"{domain_prefix}/{rel}"
-    elif "localhost" in video_url or "127.0.0.1" in video_url:
-        if "public/" in video_url:
-            rel = "public/" + video_url.split("public/", 1)[1]
-            video_url = f"{domain_prefix}/{rel}"
-
-    cld_name = (getattr(req, "cloudinaryCloudName", None) or os.environ.get("CLOUDINARY_CLOUD_NAME") or "").strip()
-    cld_preset = (getattr(req, "cloudinaryUploadPreset", None) or os.environ.get("CLOUDINARY_UPLOAD_PRESET") or "").strip()
-
-    # If video_url is an endpoint (e.g. /api/render-download) or we have Cloudinary credentials, fetch, optimize, and upload to Cloudinary!
-    if "/api/render-download/" in video_url or not any(video_url.lower().split("?")[0].endswith(ext) for ext in [".mp4", ".mov", ".webm", ".m4v"]) or (cld_name and cld_preset and not video_url.startswith("https://res.cloudinary.com")):
-        try:
-            print(f"📥 Processing video from {video_url} for Buffer (Cloudinary: {bool(cld_name and cld_preset)})...", flush=True)
-            dl_res = requests.get(video_url, timeout=60, stream=True)
-            if dl_res.status_code == 200:
-                upload_id = str(uuid.uuid4())
-                task_dir = os.path.join(PUBLIC_DIR, f"buffer_{upload_id}")
-                os.makedirs(task_dir, exist_ok=True)
-                target_path = os.path.join(task_dir, "video.mp4")
-                with open(target_path, "wb") as f_out:
-                    for chunk in dl_res.iter_content(chunk_size=16384):
-                        if chunk:
-                            f_out.write(chunk)
-                    f_out.flush()
-                    os.fsync(f_out.fileno())
-                ensure_faststart_mp4(target_path)
-
-                if cld_name and cld_preset:
-                    cld_url = upload_to_cloudinary(target_path, cld_name, cld_preset)
-                    if cld_url:
-                        video_url = cld_url
-                        print(f"🌟 Successfully uploaded to Cloudinary: {video_url}", flush=True)
-
-                if not video_url.startswith("https://res.cloudinary.com"):
-                    video_url = f"{domain_prefix}/public/buffer_{upload_id}/video.mp4"
-                print(f"✅ Ready MP4 for Buffer: {video_url} ({os.path.getsize(target_path)} bytes)", flush=True)
-        except Exception as dl_err:
-            print(f"⚠️ Stream caching fallback warning: {dl_err}", flush=True)
-            
-    print(f"🚀 Buffer Create Post: final video URL = {video_url}", flush=True)
-
-    # Auto-resolve channelId if not supplied
-    channel_id = req.channelId
-    if not channel_id:
-        try:
-            ch_data = await buffer_get_channels({"apiKey": api_key})
-            channels = ch_data.get("channels", [])
-            for ch in channels:
-                if ch.get("service") == "tiktok":
-                    channel_id = ch.get("id")
-                    break
-                if not channel_id:
-                    channel_id = ch.get("id")
-        except Exception as err:
-            print(f"Auto-resolve channel failed: {err}", flush=True)
-
-    if not channel_id:
-        raise HTTPException(400, "لم يتم العثور على أي قناة مربوطة في حساب Buffer الخاص بك. يرجى ربط حساب TikTok في لوحة Buffer.")
-
-    if req.publishNow:
-        mode = "shareNow"
-    elif req.scheduledFor:
-        mode = "customScheduled"
-    else:
-        mode = "addToQueue"
-
-    input_payload = {
-        "channelId": channel_id,
-        "text": req.content or "#shorts #fyp #viral #rekaption",
-        "schedulingType": "automatic",
-        "mode": mode,
-        "assets": [
-            {
-                "video": {
-                    "url": video_url
-                }
-            }
-        ]
-    }
-
-    if req.scheduledFor and mode == "customScheduled":
-        input_payload["dueAt"] = req.scheduledFor
-
-    if req.saveToDraft:
-        input_payload["saveToDraft"] = True
-
-    create_mutation = """
-    mutation CreatePost($input: CreatePostInput!) {
-      createPost(input: $input) {
-        ... on PostActionSuccess {
-          post {
-            id
-            text
-            dueAt
-            status
-            assets {
-              id
-              mimeType
-              source
-            }
-          }
-        }
-        ... on MutationError {
-          message
-        }
-      }
-    }
-    """
-
-    # Warmup URL ping
-    try:
-        if video_url.startswith("http"):
-            requests.head(video_url, timeout=5)
-    except Exception:
-        pass
-
-    max_retries = 2
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"🚀 Buffer createPost attempt {attempt}/{max_retries} with video URL: {video_url}", flush=True)
-            res = requests.post(
-                "https://api.buffer.com",
-                headers=headers,
-                json={
-                    "query": create_mutation,
-                    "variables": {"input": input_payload}
-                },
-                timeout=20
-            )
-            if res.status_code != 200:
-                raise HTTPException(res.status_code, f"Buffer API Error: {res.text}")
-
-            res_json = res.json()
-            print(f"Buffer GraphQL Raw Response (attempt {attempt}): {res_json}", flush=True)
-
-            if "errors" in res_json and not res_json.get("data"):
-                err_msg = res_json['errors'][0].get('message', '')
-                if ("thumbnail" in err_msg.lower() or "metadata" in err_msg.lower()) and "metadata" in input_payload["assets"][0]["video"]:
-                    input_payload["assets"][0]["video"].pop("metadata", None)
-                    continue
-                raise HTTPException(400, f"Buffer Error: {err_msg}")
-
-            create_result = res_json.get("data", {}).get("createPost", {})
-            if "message" in create_result and "post" not in create_result:
-                err_msg = create_result['message']
-                if "Video could not be read" in err_msg:
-                    if attempt < max_retries:
-                        time.sleep(2)
-                        continue
-                    raise HTTPException(400, "سيرفرات Buffer لم تتمكن من تنزيل الفيديو من الرابط المباشر. يرجى تفعيل سحابة Cloudinary (Cloud Name + Upload Preset) من الخانة المجاورة لضمان وصول Buffer للملف في ثانية واحدة بنسبة 100%.")
-
-                if ("thumbnail" in err_msg.lower() or "metadata" in err_msg.lower()) and "metadata" in input_payload["assets"][0]["video"]:
-                    input_payload["assets"][0]["video"].pop("metadata", None)
-                    continue
-
-                raise HTTPException(400, f"Buffer Mutation Error: {create_result['message']}")
-
-            # Succeeded!
-            action_msg = "تم نشر الفيديو فوراً على حسابك بنجاح!" if req.publishNow else ("تمت جدولة الفيديو في الموعد المحدد بنجاح!" if req.scheduledFor else "تمت إضافة الفيديو إلى طابور النشر (Queue) بنجاح!")
-            return {
-                "status": "success",
-                "message": action_msg,
-                "data": create_result
-            }
-        except HTTPException as he:
-            if attempt == max_retries:
-                raise he
-            time.sleep(2)
-        except Exception as e:
-            if attempt == max_retries:
-                raise HTTPException(500, f"Failed to post to Buffer: {str(e)}")
-            time.sleep(2)
-
-@app.post("/api/buffer/posts")
-async def buffer_get_posts(payload: dict):
-    api_key = payload.get("apiKey") or os.environ.get("BUFFER_API_KEY")
-    if not api_key:
-        raise HTTPException(400, "Buffer API Key is required.")
-
-    headers = {
-        "Authorization": f"Bearer {api_key.strip()}",
-        "Content-Type": "application/json"
-    }
-
-    try:
-        ch_info = await buffer_get_channels({"apiKey": api_key})
-        channels = ch_info.get("channels", [])
-        if not channels:
-            return {"posts": []}
-
-        org_id = payload.get("organizationId") or channels[0].get("organizationId")
-        if not org_id:
-            return {"posts": []}
-
-        channel_ids = [ch["id"] for ch in channels]
-        posts_query = """
-        query GetScheduledPosts($input: PostsInput!) {
-          posts(input: $input, first: 20) {
-            edges {
-              node {
-                id
-                text
-                status
-                dueAt
-                createdAt
-                channelId
-              }
-            }
-          }
-        }
-        """
-        res = requests.post(
-            "https://api.buffer.com",
-            headers=headers,
-            json={
-                "query": posts_query,
-                "variables": {
-                    "input": {
-                        "organizationId": org_id,
-                        "filter": {
-                            "channelIds": channel_ids
-                        }
-                    }
-                }
-            },
-            timeout=20
-        )
-        if res.status_code == 200:
-            data = res.json()
-            edges = data.get("data", {}).get("posts", {}).get("edges", [])
-            posts_list = [e.get("node") for e in edges if e.get("node")]
-            return {"posts": posts_list}
-        return {"posts": []}
-    except Exception as e:
-        print(f"Error fetching Buffer posts: {e}", flush=True)
-        return {"posts": []}
-
 
 
