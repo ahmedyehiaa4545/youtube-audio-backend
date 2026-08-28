@@ -49,28 +49,18 @@ def init_cookies():
             with open(COOKIE_FILE_PATH, "w", encoding="utf-8") as f:
                 f.write(cookies_env.strip())
             print("🔑 cookies.txt written from YOUTUBE_COOKIES env variable.", flush=True)
-            return
         except Exception as e:
             print(f"⚠️ Failed to write cookies from env: {e}", flush=True)
-
-    # Check local cookies.txt from repo in current dir, script dir, or parent dir
-    possible_cookie_paths = [
-        "cookies.txt",
-        os.path.join(os.path.dirname(__file__), "cookies.txt"),
-        os.path.join(os.path.dirname(__file__), "..", "cookies.txt"),
-        "/app/cookies.txt",
-        "/app/youtube-audio-backend/cookies.txt"
-    ]
-    for p in possible_cookie_paths:
-        if os.path.exists(p) and os.path.getsize(p) > 0:
+    else:
+        # Fallback to local cookies.txt in project root
+        if os.path.exists("cookies.txt"):
             try:
-                shutil.copy(p, COOKIE_FILE_PATH)
-                print(f"🔑 cookies.txt copied from {p} to {COOKIE_FILE_PATH}.", flush=True)
-                return
+                shutil.copy("cookies.txt", COOKIE_FILE_PATH)
+                print("🔑 cookies.txt copied from project root to /tmp.", flush=True)
             except Exception as e:
-                print(f"⚠️ Failed to copy {p}: {e}", flush=True)
-
-    print("⚠️ Warning: No cookies.txt found in repository or env variable!", flush=True)
+                print(f"⚠️ Failed to copy local cookies.txt: {e}", flush=True)
+        else:
+            print("⚠️ Warning: No cookies.txt found in project root or YOUTUBE_COOKIES env variable!", flush=True)
 
 def cleanup_old_temp_files(max_age_seconds: int = 172800):
     """Clean up temp folders and rendered videos older than 48 hours."""
@@ -103,7 +93,6 @@ class DownloadRequest(BaseModel):
 
 class ShortSuggestion(BaseModel):
     title: str = Field(description="عنوان جذاب ومثير للمقطع القصير")
-    category: str | None = Field(default="🎯 قصة وخلاصة مكتملة", description="تصنيف نوع المقطع: '🎯 قصة وخلاصة مكتملة' أو '💡 سر ونصيحة ذهبية' أو '🔥 موقف درامي / صدمة' أو '⚡ مقطع تشويقي'")
     start_time: str = Field(description="توقيت بداية المقطع كما ورد في النص المفرغ تماماً (مثال: 05:47)")
     end_time: str = Field(description="توقيت نهاية المقطع كما ورد في النص المفرغ تماماً (مثال: 06:02)")
     script: str = Field(description="النص الكامل للمقطع القصير كما ورد في التفريغ")
@@ -125,7 +114,7 @@ class CutRequest(BaseModel):
     url: str
     start_time: str
     end_time: str
-    quality: int = 1080
+    quality: int = 720
 
 def parse_time_to_seconds(time_str: str) -> float:
     """Convert HH:MM:SS or MM:SS or raw seconds to float seconds"""
@@ -315,53 +304,6 @@ def parse_transcription_segments(transcription: str):
                 
     return segments
 
-def snap_short_timestamps_to_sentences(transcription: str, start_time: str, end_time: str) -> tuple[str, str]:
-    """
-    محاذاة توقيت البداية والنهاية تلقائياً لأقرب حدود جملة طبيعية ومكتملة،
-    لمنع قطع الكلام في منتصف الجملة أو قبل اكتمال قفلة الفكرة.
-    """
-    try:
-        start_sec = parse_time_to_seconds(start_time)
-        end_sec = parse_time_to_seconds(end_time)
-    except Exception:
-        return start_time, end_time
-
-    segments = parse_transcription_segments(transcription)
-    if not segments:
-        return start_time, end_time
-
-    # 1. محاذاة البداية لأول جملة تبدأ عند أو قبل start_sec بقليل
-    snapped_start = start_sec
-    for seg in segments:
-        if seg["start"] <= start_sec <= seg["end"] or (abs(seg["start"] - start_sec) <= 2.0):
-            snapped_start = seg["start"]
-            break
-
-    # 2. محاذاة النهاية لآخر جملة كاملة حتى لا يتم قطع المتحدث قبل أن يختم كلمته
-    snapped_end = end_sec
-    matching_segs = [s for s in segments if s["start"] >= (snapped_start - 0.5) and s["start"] < end_sec]
-    if matching_segs:
-        last_seg = matching_segs[-1]
-        # إذا كانت الجملة الأخيرة تمتد قليلاً بعد end_sec (حتى 5 ثوانٍ)، نمد النهاية حتى تكتمل الجملة بالكامل
-        if last_seg["end"] >= end_sec:
-            snapped_end = last_seg["end"]
-        elif (end_sec - last_seg["end"]) < 3.0:
-            snapped_end = last_seg["end"]
-        else:
-            snapped_end = max(end_sec, last_seg["end"])
-
-    def format_secs(s: float) -> str:
-        s = max(0, s)
-        h = int(s // 3600)
-        m = int((s % 3600) // 60)
-        sec = int(s % 60)
-        if h > 0:
-            return f"{h:02d}:{m:02d}:{sec:02d}"
-        else:
-            return f"{m:02d}:{sec:02d}"
-
-    return format_secs(snapped_start), format_secs(snapped_end)
-
 def rebuild_script_for_short(transcription: str, start_time: str, end_time: str, fallback_script: str) -> str:
     try:
         start_sec = parse_time_to_seconds(start_time)
@@ -373,7 +315,7 @@ def rebuild_script_for_short(transcription: str, start_time: str, end_time: str,
     matching_texts = []
     
     for seg in segments:
-        if seg["start"] < (end_sec + 0.1) and seg["end"] > (start_sec - 0.1):
+        if seg["start"] < (end_sec - 0.01) and seg["end"] > (start_sec + 0.01):
             matching_texts.append(seg["text"])
             
     rebuilt = " ".join(matching_texts).strip()
@@ -384,64 +326,154 @@ def extract_video_id(url: str) -> str | None:
     match = re.search(pattern, url)
     return match.group(1) if match else None
 
-def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None) -> str:
-    """
-    تحميل الصوت مباشرة وسريعاً من يوتيوب عبر مكتبة yt_dlp الأصلية مع عملاء البث المعتمدين والكوكيز
-    """
-    import yt_dlp
+def download_audio_via_rapidapi(youtube_url: str, output_path: str, task_id: str = None) -> str:
+    video_id = extract_video_id(youtube_url)
+    if not video_id:
+        raise Exception("رابط الفيديو غير صالح!")
 
     def update_task(msg):
         if task_id and task_id in TASKS:
             TASKS[task_id]["progress"] = msg
 
-    update_task("⚡ جاري استخراج وتحميل الصوت من يوتيوب...")
-    print(f"⚡ Downloading audio directly via yt-dlp for {youtube_url}...", flush=True)
+    RAPID_API_KEY = os.environ.get("RAPID_API_KEY", "78aaeed1d3mshdc777f49020e221p1803c4jsn35138c026a86")
 
-    output_base = output_path.replace(".mp3", "")
-
-    # إعدادات السحب الأصلية المعززة بعملاء البث والكوكيز
-    opts = {
-        "format": "bestaudio/best",
-        "outtmpl": output_base,
-        "extractor_args": {"youtube": {"player_client": ["android_vr", "ios", "mweb", "android"]}},
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
-        "quiet": True,
-        "noprogress": True,
-        "socket_timeout": 30,
-        "concurrent_fragment_downloads": 5,
+    headers = {
+        'x-rapidapi-host': 'youtube-mp4-mp3-downloader.p.rapidapi.com',
+        'x-rapidapi-key': RAPID_API_KEY,
+        'Content-Type': 'application/json'
     }
 
-    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-        opts["cookiefile"] = COOKIE_FILE_PATH
+    update_task("⚡ جاري تحميل ملف الصوت المباشر...")
+    print(f"[*] Sending download request to RapidAPI for video ID: {video_id}...", flush=True)
+    api_url = "https://youtube-mp4-mp3-downloader.p.rapidapi.com/api/v1/download"
+    params = {
+        'format': 'mp3',
+        'id': video_id,
+        'audioQuality': '128',
+        'addInfo': 'false',
+        'allowExtendedDuration': 'true'
+    }
+
+    response = requests.get(api_url, headers=headers, params=params, timeout=15)
+    if response.status_code != 200:
+        raise Exception(f"Failed to start conversion. Status code: {response.status_code}. Detail: {response.text}")
+    
+    res_data = response.json()
+    rapid_task_id = res_data.get('progressId') or res_data.get('id')
+    if not rapid_task_id:
+        raise Exception(f"Task ID not found in response: {res_data}")
+
+    print(f"[+] RapidAPI Conversion started. Task ID: {rapid_task_id}", flush=True)
+
+    progress_url = "https://youtube-mp4-mp3-downloader.p.rapidapi.com/api/v1/progress"
+    download_url = None
+    max_retries = 25  # 25 * 3s = 75 seconds max timeout
+    
+    for attempt in range(max_retries):
+        prog_percent = min(90, int(((attempt + 1) / max_retries) * 100))
+        update_task(f"🌐 جارٍ تجهيز وتحميل ملف الصوت عبر السيرفر ({prog_percent}%)...")
+        print(f"[*] Checking conversion progress... (attempt {attempt + 1}/{max_retries})", flush=True)
+        
+        try:
+            progress_res = requests.get(progress_url, headers=headers, params={'id': rapid_task_id}, timeout=10)
+            if progress_res.status_code == 200:
+                progress_data = progress_res.json()
+                if progress_data.get('finished') is True or progress_data.get('status') == 'Finished':
+                    download_url = progress_data.get('downloadUrl')
+                    print(f"🎉 Conversion finished on RapidAPI server!", flush=True)
+                    break
+                elif progress_data.get('status') in ['Failed', 'Error']:
+                    raise Exception(f"Conversion failed on RapidAPI server: {progress_data}")
+        except Exception as pe:
+            print(f"⚠️ RapidAPI progress check warning: {pe}", flush=True)
+
+        time.sleep(3)
+
+    if not download_url:
+        raise Exception("استغرق خادم التحويل وقتاً طويلاً. يرجى المحاولة مرة أخرى أو استخدام فيديو أقصر.")
+
+    update_task("⚡ جاري تهيئة ومعالجة ملف الصوت...")
+    print("[*] Downloading MP3 file from RapidAPI...", flush=True)
+    audio_res = requests.get(download_url, stream=True, timeout=60)
+    if audio_res.status_code != 200:
+        raise Exception(f"Failed to download audio file. Status: {audio_res.status_code}")
+        
+    with open(output_path, 'wb') as f:
+        for chunk in audio_res.iter_content(chunk_size=1024*1024):
+            if chunk:
+                f.write(chunk)
+                
+    print("[+] Audio downloaded and saved successfully.", flush=True)
+    return output_path
+
+def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None) -> str:
+    """
+    Downloads YouTube audio fast via direct stream extraction (takes 3-5 seconds for long videos).
+    If yt-dlp fails or stalls, falls back smoothly to RapidAPI with real-time status.
+    """
+    def update_task(msg):
+        if task_id and task_id in TASKS:
+            TASKS[task_id]["progress"] = msg
+
+    update_task("⚡ جاري استخراج الملف الصوتي بنجاح...")
+    print(f"⚡ Attempting fast direct audio extraction via yt-dlp for {youtube_url}...", flush=True)
 
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([youtube_url])
-    except Exception as ydl_err:
-        print(f"⚠️ Primary yt_dlp download notice: {ydl_err}", flush=True)
+        raw_temp_audio = output_path + ".raw"
+        ytdl_cmd = [
+            'yt-dlp',
+            '--quiet', '--no-warnings',
+            '--no-playlist',
+            '--socket-timeout', '15',
+            '--concurrent-fragments', '4',
+            '-f', 'bestaudio[ext=m4a]/bestaudio/best',
+            '-o', raw_temp_audio
+        ]
+        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+            ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
+        ytdl_cmd.append(youtube_url)
 
-    # التحقق من وجود ملف الـ MP3 الناتج
-    if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-        print(f"🎉 Audio extracted successfully: {output_path} ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
-        return output_path
+        res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=75)
 
-    # البحث عن أي ملف صوتي تم إنشاؤه في المجلد
-    parent_dir = os.path.dirname(output_path)
-    base_name = os.path.basename(output_base)
-    for f in os.listdir(parent_dir):
-        if f.startswith(base_name) and f.endswith(".mp3") and os.path.getsize(os.path.join(parent_dir, f)) > 1000:
-            found_path = os.path.join(parent_dir, f)
-            if found_path != output_path:
-                try: os.rename(found_path, output_path)
-                except: pass
-            print(f"🎉 Audio extracted successfully: {output_path}", flush=True)
-            return output_path
+        downloaded_file = None
+        if os.path.exists(raw_temp_audio):
+            downloaded_file = raw_temp_audio
+        else:
+            parent_dir = os.path.dirname(raw_temp_audio)
+            base_name = os.path.basename(raw_temp_audio)
+            for f in os.listdir(parent_dir):
+                if f.startswith(base_name):
+                    downloaded_file = os.path.join(parent_dir, f)
+                    break
 
-    raise Exception("فشل استخراج ملف الصوت من يوتيوب. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
+        if downloaded_file and os.path.exists(downloaded_file) and os.path.getsize(downloaded_file) > 0:
+            update_task("⚡ جاري معالجة وتجهيز الصوت...")
+            print(f"🚀 Audio stream downloaded ({os.path.getsize(downloaded_file)} bytes). Fast converting to MP3 via ffmpeg...", flush=True)
+            
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',
+                '-i', downloaded_file,
+                '-ar', '44100',
+                '-b:a', '192k',
+                output_path
+            ]
+            ff_res = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+            
+            try: os.remove(downloaded_file)
+            except: pass
+
+            if ff_res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                print("🎉 Direct audio extraction succeeded!", flush=True)
+                return output_path
+
+        err_msg = res.stderr.strip() if res.stderr else "yt-dlp returned non-zero code or empty file"
+        print(f"⚠️ Direct yt-dlp extraction failed ({err_msg}). Falling back to RapidAPI...", flush=True)
+
+    except Exception as e:
+        print(f"⚠️ Direct yt-dlp extraction error ({e}). Falling back to RapidAPI...", flush=True)
+
+    update_task("⚡ جاري استخراج الملف الصوتي...")
+    return download_audio_via_rapidapi(youtube_url, output_path, task_id)
 
 # دالة لضبط التوقيتات برمجياً (رياضياً)
 def adjust_timestamps(text: str, offset_minutes: int) -> str:
@@ -870,19 +902,6 @@ def fix_arabic_spelling(text: str) -> str:
     import re
     t = text.strip().strip('"\'`')
     
-    # Correction for common ASR elongation mistakes on verbs and words
-    asr_verb_fixes = {
-        r"\bترضاع(\w*)\b": r"ترضع\1",
-        r"\bيرضاع(\w*)\b": r"يرضع\1",
-        r"\bتولاد(\w*)\b": r"تلد\1",
-        r"\bيولاد(\w*)\b": r"يلد\1",
-        r"\bتتعلام(\w*)\b": r"تتعلم\1",
-        r"\bيتعلام(\w*)\b": r"يتعلم\1",
-        r"\bتتكلموا\b": "تتكلمون",
-    }
-    for pat, rep in asr_verb_fixes.items():
-        t = re.sub(pat, rep, t)
-    
     # Common Tanween Adverbs
     tanween_map = {
         r"\bشكرا\b": "شكراً",
@@ -967,28 +986,20 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         "X-Title": "ReKaption"
     }
     system_prompt = (
-        "أنت خبير ومخرج ومونتير محترف في صناعة واقتطاع المحتوى الفيروسي الأكثر انتشاراً وتأثيراً على TikTok و Shorts و Reels (Viral Content Creator & Master Storyteller).\n"
-        "مهمتك الأساسية والجوهرية: تحليل النص المفرغ واستخراج مقاطع قصيرة (Shorts) مميزة ومكتملة البنية تماماً (بداية مشوقة + سياق قوي + كشف السر/الإجابة + قفلة ختامية منطقية ومقنعة 100%).\n"
-        "\n"
-        "⚠️ قواعد حاسمة لمنع المقاطع المبتورة والقفلات الخائبة:\n"
-        "1. ممنوع منعاً باتاً استخراج 'مقدمة الفيديو التشويقية' فقط (No Intro-Only Teasers): يجب أن يشمل المقطع الشرح وكشف السر والخاتمة بالكامل.\n"
-        "2. اكتمال الوعد والسر المطروح في العنوان (Payoff Guarantee): يجب أن يحتوي سكربت المقطع المقصوص على شرح السر والنتيجة كاملة.\n"
-        "3. اكتمال المعنى والنتيجة: يجب أن ينتهي المقطع دائماً عند نهاية جملة تامة مكتملة الأركان.\n"
-        "4. تصنيف نوع المقطع (category): صنف كل مقطع (🎯 قصة وخلاصة مكتملة / 💡 سر ونصيحة ذهبية / 🔥 موقف درامي / صدمة / ⚡ مقطع تشويقي).\n"
-        "\n"
-        "⚠️ شروط العنوان وتصحيح الأخطاء اللغوية الإلزامية:\n"
-        "1. التصحيح اللغوي والنحوي الإجباري (Mandatory Grammar & Spelling Correction): يُمنع منعاً باتاً نقل الأخطاء الإملائية أو اللغوية الناتجة عن التفريغ الصوتي (مثل: مد الحروف كـ 'ترضاعها' التي يجب تصحيحها حتماً إلى 'تُرضِعها'). يجب صياغة العنوان بلغة عربية فصيحة وسليمة نحوياً وإملائياً 100%.\n"
-        "2. الارتباط العميق بسكربت هذا المقطع تحديداً وإثارة الفضول القاتل (Curiosity Hook).\n"
-        "3. السلامة الإملائية التامة للهمزات والتاء المربوطة وتنوين الفتح (شكراً، جداً، عاماً).\n"
-        "يجب أن تكون إجابتك بصيغة JSON فقط بالتنسيق التالي:\n"
+        "أنت خبير ومخرج محترف في صناعة المحتوى الفيروسي الأكثر مشاهدة على تيك توك ويوتيوب وريلز (Viral Content Creator & Growth Hacker).\n"
+        "مهمتك الرئيسية: قراءة وفهم سكربت كل مقطع مقصوص بدقة شديدة واستيعاب الفكرة الحصرية التي تدور داخل هذا المقطع بالذات، ثم صياغة عنوان فيروسي خاص بهذا المقطع يثير الفضول الرهيب (Curiosity Gap & Suspense) ويجبر المشاهد على النقر والمتابعة حتى النهاية.\n"
+        "شروط العنوان الإلزامية:\n"
+        "1. الارتباط العميق بسكربت هذا المقطع تحديداً: يجب أن يغطي العنوان الحدث أو السر أو الصدمة أو الموقف الفعلي الذي يدور داخل هذا الشورت، وممنوع منعاً باتاً العناوين العامة المكررة التي تصلح لأي فيديو.\n"
+        "2. القوة والجرأة وإثارة الفضول (Curiosity Hook): اصنع عنواناً يطرح تساؤلاً أو يكشف جزءاً مثيراً دون حرق الخاتمة ليجعل المشاهد يكمل الفيديو لنهايته.\n"
+        "3. السلامة الإملائية واللغوية 100%: يجب أن يكون العنوان خالياً تماماً من أي أخطاء إملائية أو نحوية (انتبه للهمزات 'أ/إ/آ'، التاء المربوطة 'ة' والهاء 'ه'، وتنوين الفتح 'ـاً' مثل: شكراً، جداً، عاماً، ريالاً)، حتى لو كان السكربت المفرغ يحتوي على أخطاء من التفريغ الصوتي.\n"
+        "يجب أن تكون إجابتك بصيغة JSON فقط بالتنسيق التالي بدون أي نصوص إضافية خارج الـ JSON:\n"
         "{\n"
         '  "shorts": [\n'
         '    {\n'
-        '      "title": "عنوان جريء ومثير ومصحح نحوياً وإملائياً 100%",\n'
-        '      "category": "🎯 قصة وخلاصة مكتملة",\n'
+        '      "title": "عنوان جريء ومثير يغطي قصة هذا المقطع بالذات وخالٍ تماماً من الأخطاء الإملائية",\n'
         '      "start_time": "05:47",\n'
-        '      "end_time": "06:50",\n'
-        '      "script": "النص الكامل للمقطع القصير من البداية ومروراً بشرح السر وحتى القفلة والنتيجة الكاملة",\n'
+        '      "end_time": "06:20",\n'
+        '      "script": "النص الكامل للمقطع القصير كما ورد في التفريغ",\n'
         '      "hook": "الجملة الافتتاحية في أول 3 ثواني"\n'
         '    }\n'
         '  ]\n'
@@ -996,9 +1007,10 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
     )
     
     title_instruction = (
-        "5. صياغة عنوان فيروسي خاص ومحدد بدقة ومصحح لغوياً 100%:\n"
-        "   - افهم الحوار والمفارقة التي حدثت في هذا المقطع تحديداً واجعله جذاباً.\n"
-        "   - التدقيق النحوي والإملائي الإلزامي: صحح أي أخطاء لغوية أو نطقية واردة في التفريغ وتأكد من سلامة تصريف الأفعال والهمزات والتنوين تماماً."
+        "5. صياغة عنوان فيروسي خاص ومحدد بدقة لسكربت هذا المقطع بعينه (Specific Contextual Hook):\n"
+        "   - افهم الحوار والمفارقة التي حدثت في هذا المقطع تحديداً، واجعل العنوان يحكي عن هذا الموقف الملموس وليس عنواناً عاماً لكامل الفيديو.\n"
+        "   - أطلق العنان للجرأة والفضول (Curiosity Gap & Suspense) مثل: 'اللحظة التي تغير فيها كل شيء بنفس الدقيقة...', 'كيف فكك هذا الفخ الصادم في ثوانٍ؟', 'السر الحقيقي الذي حاولوا إخفاءه طوال السنوات!'.\n"
+        "   - التدقيق الإملائي الإلزامي: كتابة العنوان بدقة لغوية وإملائية تامة 100% بدون أي أخطاء في الهمزات أو التاء المربوطة أو التنوين."
     )
     if title_style == "short":
         title_instruction = (
@@ -1010,13 +1022,12 @@ def call_openrouter_shorts(transcription: str, num_shorts: int, api_key: str, mo
         )
 
     user_prompt = (
-        f"قم بتحليل النص المفرغ التالي واستخرج أفضل {num_shorts} مقاطع قصيرة (Shorts) مميزة ومكتملة الفكرة تماماً.\n\n"
+        f"قم بتحليل النص المفرغ التالي واستخرج أفضل {num_shorts} مقاطع قصيرة (Shorts) مميزة ومثيرة للاهتمام وتصلح لتكون مقاطع مستقلة ناجحة.\n\n"
         "شروط استخراج كل مقطع:\n"
         "1. يجب أن تكون البداية والنهاية مستندة بدقة إلى التوقيتات الموجودة في النص المرفق (مثال: 05:47 أو 12:30).\n"
-        "2. مدة المقطع واكتمال الحكاية/السر: تتراوح مدة المقاطع بين 30 ثانية و 180 ثانية (3 دقائق كحد أقصى). ممنوع منعاً باتاً قطع المقطع قبل كشف السر أو شرح الفكرة أو إتمام القصة بالكامل. إذا طرح المقطع سؤالاً أو لغزاً، مدّ التوقيت حتى اكتمال الإجابة والتفسير والنهاية.\n"
-        "3. ممنوع استخراج مقدمات الفيديوهات الطويلة التي تحيل المشاهد لإكمال الفيديو أو تنتهي قبل شرح الموضوع.\n"
-        "4. تحديد الخطاف (Hook) في أول 3 ثوانٍ فقط (جملة افتتاحية قصيرة من 3 إلى 7 كلمات لشد الانتباه).\n"
-        "5. كتابة السكربت كاملاً من بداية المقطع وحتى ختامه التام بدقة كما ورد في النص.\n"
+        "2. مدة المقطع واكتمال الحكاية/القصة: تتراوح مدة المقاطع العادية بين 30 ثانية و 150 ثانية (دقيقتين ونصف). أما إذا كان المقطع يتضمن قصة أو موقفاً أو حكاية أو مقلباً (Story / Narrative): يمنع منعاً باتاً قطع القصة في منتصفها، ويجب استمرار المقطع حتى اكتمال الخاتمة وقفلة الموقف بالكامل، ويُسمح بالامتداد خصيصاً في حالات القصص والمواقف حتى 210 ثانية (3 دقائق ونصف كحد أقصى) لضمان اكتمال الحكاية ونهايتها السعيدة/المفاجئة دون بتر.\n"
+        "3. يجب تحديد 'الخطاف' (Hook) وهو أول 3 ثوانٍ فقط في أول المقطع (جملة افتتاحية مشوقة قصيرة جداً من 3 إلى 7 كلمات من أول المقطع لشد انتباه المشاهد). يُمنع منعاً باتاً نسج الفقرة الكاملة أو نص المقطع كـ Hook.\n"
+        "4. كتابة السكريبت (script) الخاص بالمقطع بدقة كما ورد في النص المفرغ دون تغيير الكلمات.\n"
         f"{title_instruction}\n"
     )
 
@@ -1141,15 +1152,8 @@ async def suggest_shorts(req: SuggestShortsRequest):
 
     max_secs = get_max_transcription_seconds(req.transcription)
     for s in shorts_list:
-        raw_start = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
-        raw_end = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
-
-        # محاذاة البداية والنهاية لحدود الجمل الطبيعية لمنع أي قطع في منتصف الكلام أو قبل القفلة
-        snapped_start, snapped_end = snap_short_timestamps_to_sentences(req.transcription, raw_start, raw_end)
-        s["start_time"] = snapped_start
-        s["end_time"] = snapped_end
-        s["category"] = s.get("category") or "🎯 قصة وخلاصة مكتملة"
-
+        s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
+        s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
         s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
         s["script"] = rebuild_script_for_short(
             transcription=req.transcription,
@@ -1205,12 +1209,10 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
             )
 
             prompt = (
-                "أنت خبير ومخرج ومونتير محترف في صناعة واقتطاع المحتوى الفيروسي (Viral Content Creator & Master Storyteller).\n"
-                f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة ومكتملة الفكرة تماماً.\n"
-                "⚠️ قواعد حاسمة لاكتمال القصة والسر (ممنوع المقاطع المبتورة نهائياً):\n"
-                "1. ممنوع منعاً باتاً استخراج 'مقدمة الفيديو فقط' (No Intro Teasers): يُمنع قص مقطع ينتهي بعبارات مثل 'وده اللي هنتكلم عنه في الفيديو ده' أو 'تعالوا نشوف إيه اللي حصل' دون أن يحتوي المقطع على الشرح والسر نفسه! يجب إطالة التوقيت ليشمل كشف السر والتفسير الفعلي والخاتمة بالكامل.\n"
-                "2. اكتمال الوعد المطروح في العنوان: إذا تحدث العنوان عن سر أو خدعة أو صدمة، يجب أن يحتوي سكربت الشورتس على شرح وتفاصيل ذلك السر والنتيجة كاملة حتى لا يشعر المشاهد بالبتر.\n"
-                "3. القفلة الختامية: يجب أن ينتهي المقطع دائماً عند نهاية جملة تامة مكتملة الأركان (النتيجة، العبرة، أو خلاصة الفكرة).\n\n"
+                "أنت خبير ومخرج محترف في صناعة المحتوى الفيروسي (Viral Content Creator) ومقاطع الفيديو القصيرة (Shorts/Reels/TikTok).\n"
+                f"قم بتحليل النص المفرغ التالي واستخرج منه أفضل {req.numShorts} مقاطع قصيرة مميزة جداً.\n"
+                "شرط العناوين الجريئة والحماسية (Curiosity Gap): إياك والعناوين التقليدية العامة. اختر أجرأ وأكثر نقطة تشويقية وصادمة داخل القصة واجعلها عنواناً مثيراً يجبر المشاهد على النقر وإكمال المقطع لآخره.\n"
+                "شروط المدة واكتمال الحكاية: تتراوح مدة المقاطع العادية بين 30 ثانية و 150 ثانية (دقيقتين ونصف). أما للمواقف والقصص والمقالب (Story / Narrative): يمنع قطع القصة في منتصفها ويجب استمرار المقطع حتى اكتمال القفلة والخاتمة بالكامل، ويُسمح بالامتداد خصيصاً للقصص والمواقف حتى 210 ثانية (3 دقائق ونصف كحد أقصى) لضمان اكتمال الحكاية دون بتر.\n\n"
             )
             if req.customPrompt and req.customPrompt.strip():
                 prompt += f"⚠️ توجيهات إضافية مخصصة من المستخدم (يجب الالتزام بها بصرامة):\n{req.customPrompt.strip()}\n\n"
@@ -1225,15 +1227,8 @@ def run_suggest_shorts_background(task_id: str, req: SuggestShortsRequest):
 
         max_secs = get_max_transcription_seconds(req.transcription)
         for s in shorts_list:
-            raw_start = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
-            raw_end = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
-
-            # محاذاة البداية والنهاية لحدود الجمل الطبيعية
-            snapped_start, snapped_end = snap_short_timestamps_to_sentences(req.transcription, raw_start, raw_end)
-            s["start_time"] = snapped_start
-            s["end_time"] = snapped_end
-            s["category"] = s.get("category") or "🎯 قصة وخلاصة مكتملة"
-
+            s["start_time"] = normalize_time_str(s.get("start_time", "00:00:00"), max_secs)
+            s["end_time"] = normalize_time_str(s.get("end_time", "00:00:00"), max_secs)
             s["title"] = enforce_title_style(s.get("title", ""), req.titleStyle)
 
             s["script"] = rebuild_script_for_short(
@@ -1312,9 +1307,8 @@ def get_cookie_header_from_file(cookie_file_path: str) -> str:
         print(f"Error parsing cookies file: {e}", flush=True)
     return "; ".join(cookies)
 
-def build_ffmpeg_http_headers(format_dict=None) -> str:
-    """Construct HTTP headers string for FFmpeg to access googlevideo streams directly"""
-    headers = format_dict.get('http_headers', {}) if format_dict else {}
+def get_ffmpeg_headers(format_dict) -> str:
+    headers = format_dict.get('http_headers', {})
     header_str = ""
     for k, v in headers.items():
         if k.lower() == 'referer':
@@ -1322,8 +1316,7 @@ def build_ffmpeg_http_headers(format_dict=None) -> str:
         header_str += f"{k}: {v}\r\n"
     
     # Enforce Referer header for googlevideo streams to bypass 403 Forbidden
-    if "Referer:" not in header_str:
-        header_str += "Referer: https://www.youtube.com/\r\n"
+    header_str += "Referer: https://www.youtube.com/\r\n"
     
     # Ensure User-Agent is present
     if "User-Agent" not in header_str and "user-agent" not in header_str.lower():
@@ -1336,9 +1329,6 @@ def build_ffmpeg_http_headers(format_dict=None) -> str:
         
     return header_str
 
-def get_ffmpeg_headers(format_dict) -> str:
-    return build_ffmpeg_http_headers(format_dict)
-
 def format_seconds_to_time_str(seconds: float) -> str:
     """Format float seconds into HH:MM:SS.mmm format for precise clipping"""
     h = int(seconds // 3600)
@@ -1349,136 +1339,6 @@ def format_seconds_to_time_str(seconds: float) -> str:
         s += 1
         ms = 0
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
-
-def cut_segment_fast(url: str, start_sec: float, end_sec: float, quality: int, output_path: str, progress_callback=None) -> str:
-    """
-    محرك القص الذكي ثلاثي المراحل (3-Tier Robust Cut Engine):
-    1. محاولة السحب بأعلى جودة (1080p/720p HD) عبر الكوكيز والاتصال المتوازي مع مهلة ديناميكية.
-    2. محرك الإنقاذ فائق السرعة مع الكوكيز والبث المباشر (Single-Stream Fast Direct Extraction).
-    3. المحرك النهائي البديل مع الكوكيز.
-    """
-    if progress_callback:
-        progress_callback("💎 جاري استخراج وقص المقطع بأعلى دقة متاحة...")
-
-    clip_len = max(1.0, end_sec - start_sec)
-    end_extension = 0.75
-    fade_in_duration = 0.2
-    fade_out_duration = 0.75
-    start_fade_out = clip_len
-
-    start_time_str = format_seconds_to_time_str(start_sec)
-    extended_end_time_str = format_seconds_to_time_str(end_sec + end_extension)
-    temp_raw = output_path + ".raw.mp4"
-
-    # مهلة سخية تضمن اكتمال تنزيل الـ 1080p بدون قطع الاتصال
-    timeout_tier1 = max(360, int(clip_len * 3.5) + 180)
-    timeout_rescue = max(240, int(clip_len * 2.5) + 120)
-
-    target_format_hd = f"bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
-
-    download_success = False
-
-    # 1. المرحلة الأولى: السحب عالي الدقة 1080p الأصلي بالكوكيز
-    try:
-        ytdl_cmd = [
-            'yt-dlp',
-            '--no-playlist',
-            '--socket-timeout', '30',
-            '--concurrent-fragments', '5',
-            '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
-            '--force-keyframes-at-cuts',
-            '-f', target_format_hd,
-            '--merge-output-format', 'mp4',
-            '-o', temp_raw
-        ]
-        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-            ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
-        ytdl_cmd.append(url)
-
-        res = subprocess.run(ytdl_cmd, capture_output=True, text=True, timeout=timeout_tier1)
-        if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
-            download_success = True
-        else:
-            err_msg = res.stderr.strip()[:200] if res.stderr else "Unknown error"
-            print(f"⚠️ Tier 1 notice (code {res.returncode}): {err_msg}", flush=True)
-    except Exception as e1:
-        print(f"⚠️ Tier 1 cut exception ({timeout_tier1}s): {e1}", flush=True)
-
-    # 2. المرحلة الثانية: إعادة المحاولة بنفس دقة 1080p الكاملة
-    if not download_success or not os.path.exists(temp_raw) or os.path.getsize(temp_raw) < 1000:
-        if progress_callback:
-            progress_callback("⚡ جاري إعادة محاولة استخراج المقطع بأعلى دقة 1080p...")
-        try:
-            ytdl_cmd_retry = [
-                'yt-dlp',
-                '--no-playlist',
-                '--socket-timeout', '30',
-                '--concurrent-fragments', '5',
-                '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
-                '--force-keyframes-at-cuts',
-                '-f', target_format_hd,
-                '--merge-output-format', 'mp4',
-                '-o', temp_raw
-            ]
-            if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
-                ytdl_cmd_retry.extend(['--cookies', COOKIE_FILE_PATH])
-            ytdl_cmd_retry.append(url)
-
-            res = subprocess.run(ytdl_cmd_retry, capture_output=True, text=True, timeout=timeout_rescue)
-            if res.returncode == 0 and os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
-                download_success = True
-        except Exception as e2:
-            print(f"⚠️ Tier 2 cut exception: {e2}", flush=True)
-
-    # التحقق من وجود الملف المؤقت أو الملفات الجزئية
-    if not os.path.exists(temp_raw):
-        parent_dir = os.path.dirname(temp_raw)
-        base_name = os.path.basename(temp_raw)
-        for f in os.listdir(parent_dir):
-            if f.startswith(base_name) and os.path.getsize(os.path.join(parent_dir, f)) > 1000:
-                temp_raw = os.path.join(parent_dir, f)
-                download_success = True
-                break
-
-    if os.path.exists(temp_raw) and os.path.getsize(temp_raw) > 1000:
-        if progress_callback:
-            progress_callback("✨ جاري تطبيق الفلاتر الصوتية والتلاشي...")
-
-        ff_post = [
-            'ffmpeg', '-y',
-            '-i', temp_raw,
-            '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
-            '-map', '0:v', '-map', '[a]',
-            '-c:v', 'copy',
-            '-c:a', 'aac', '-b:a', '192k',
-            output_path
-        ]
-        try:
-            subprocess.run(ff_post, capture_output=True, text=True, timeout=40)
-        except Exception as ffe:
-            print(f"⚠️ FFmpeg post-processing notice: {ffe}", flush=True)
-            
-        try: os.remove(temp_raw)
-        except: pass
-
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-            res_info = f"{quality}p"
-            try:
-                probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', output_path]
-                dim = subprocess.check_output(probe_cmd, text=True, timeout=5).strip()
-                if dim and 'x' in dim:
-                    res_info = f"{dim} ({dim.split('x')[1]}p Full HD)" if int(dim.split('x')[1]) >= 1080 else f"{dim} ({dim.split('x')[1]}p)"
-            except Exception:
-                pass
-            print(f"🎉 Cut completed successfully! [📺 Output Quality / Resolution: {res_info}] ({os.path.getsize(output_path)/(1024*1024):.2f}MB)", flush=True)
-            return output_path
-        elif os.path.exists(temp_raw):
-            try: os.rename(temp_raw, output_path)
-            except: pass
-            return output_path
-
-    raise Exception("فشل استخراج المقطع من يوتيوب. يرجى التأكد من الرابط أو المحاولة مرة أخرى.")
-
 
 @app.post("/api/cut")
 def cut_video(req: CutRequest):
@@ -1494,18 +1354,106 @@ def cut_video(req: CutRequest):
     if start_sec >= end_sec:
         raise HTTPException(400, "start_time must be less than end_time")
 
+    # تمديد مدة التحميل والقطع بمقدار 0.75 ثانية من النهاية لعمل تأثير التلاشي عليها
+    # وتقليص تأثير التلاشي في البداية ليكون خفيفاً جداً لكي لا يضيع أول الكلام
+    end_extension = 0.75
+    fade_in_duration = 0.2
+    fade_out_duration = 0.75
+    
+    extended_end_sec = end_sec + end_extension
+    start_time_str = format_seconds_to_time_str(start_sec)
+    extended_end_time_str = format_seconds_to_time_str(extended_end_sec)
+    
+    original_duration_sec = end_sec - start_sec
+
     file_id = str(uuid.uuid4())[:8]
+    temp_raw_path = os.path.join(TEMP_DIR, f"{file_id}_raw.mp4")
     output_path = os.path.join(TEMP_DIR, f"{file_id}.mp4")
 
+    # تشغيل أمر yt-dlp للتحميل والقص مباشرة لتفادي مشاكل الـ 403 وحظر يوتيوب
+    print(f"🎬 Downloading and cutting segment: {start_time_str} to {extended_end_time_str} using direct YouTube link...", flush=True)
     start_time_proc = time.time()
-    try:
-        cut_segment_fast(req.url, start_sec, end_sec, req.quality, output_path)
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    
+    ytdl_cmd = [
+        'yt-dlp',
+        '--quiet', '--no-warnings',
+        '--no-playlist',
+        '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
+        '--force-keyframes-at-cuts',
+        '--concurrent-fragments', '5',
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        '-f', f"bestvideo[height<={req.quality}]+bestaudio/bestvideo[height<=1080]/best[height<={req.quality}]/best",
+        '--merge-output-format', 'mp4',
+        '-o', temp_raw_path
+    ]
 
+    if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+        ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
+
+    ytdl_cmd.append(req.url)
+
+    result = subprocess.run(ytdl_cmd, capture_output=True, text=True)
     elapsed = time.time() - start_time_proc
+
+    if result.returncode != 0 or not os.path.exists(temp_raw_path):
+        print(f"⚠️ Direct section cut failed ({result.stderr}). Retrying with fallback stream cut...", flush=True)
+        if os.path.exists(temp_raw_path):
+            try: os.remove(temp_raw_path)
+            except: pass
+        fallback_cmd = [
+            'yt-dlp',
+            '--quiet', '--no-warnings',
+            '--no-playlist',
+            '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
+            '-f', 'mp4/best',
+            '-o', temp_raw_path,
+            req.url
+        ]
+        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+            fallback_cmd.insert(4, '--cookies')
+            fallback_cmd.insert(5, COOKIE_FILE_PATH)
+        result2 = subprocess.run(fallback_cmd, capture_output=True, text=True)
+        if result2.returncode != 0 or not os.path.exists(temp_raw_path):
+            err_lines = result2.stderr.strip() if result2.stderr else (result.stderr.strip() if result.stderr else "Output MP4 file was not generated by yt-dlp")
+            raise HTTPException(500, f"Cutting failed: {err_lines}")
+
+    if not os.path.exists(temp_raw_path):
+        raise HTTPException(500, "Output MP4 file was not generated by yt-dlp")
+
+    # تطبيق الفلاتر الصوتية (تخفيت الصوت في البداية والنهاية وزيادة الصوت بنسبة 50%)
+    fade_applied = False
+    # يبدأ التلاشي النهائي (Fade Out) عند نهاية المقطع المحدد أصلياً (ثانية 0 إلى original_duration_sec لا يتأثران، والتلاشي يتم في الـ 0.75 ثانية الإضافية)
+    start_fade_out = original_duration_sec
+    
+    ffmpeg_cmd = [
+        'ffmpeg', '-y',
+        '-i', temp_raw_path,
+        '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
+        '-map', '0:v', '-map', '[a]',
+        '-c:v', 'copy',
+        '-c:a', 'aac', '-b:a', '192k',
+        output_path
+    ]
+    
+    filter_result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+    if filter_result.returncode == 0 and os.path.exists(output_path):
+        fade_applied = True
+        
+    # تنظيف الملف المؤقت الخام
+    try: os.remove(temp_raw_path)
+    except: pass
+
+    # في حال فشل الفلتر لأي سبب (مثل عدم وجود مسار صوتي)، نستخدم الملف الأصلي
+    if not fade_applied:
+        if os.path.exists(temp_raw_path):
+            try: os.rename(temp_raw_path, output_path)
+            except: pass
+
+    if not os.path.exists(output_path):
+        raise HTTPException(500, "Final output MP4 file was not generated")
+
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    print(f"✅ Cut success! {size_mb:.2f}MB | {elapsed:.1f}s | {req.quality}p MP4", flush=True)
+    print(f"✅ Success! {size_mb:.2f}MB | {elapsed:.1f}s | {req.quality}p MP4 (Fade/Volume applied: {fade_applied})", flush=True)
 
     return FileResponse(
         output_path,
@@ -1528,23 +1476,88 @@ def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
         
         if start_sec >= end_sec:
             raise Exception("start_time must be less than end_time")
+            
+        end_extension = 0.75
+        fade_in_duration = 0.2
+        fade_out_duration = 0.75
+        
+        extended_end_sec = end_sec + end_extension
+        start_time_str = format_seconds_to_time_str(start_sec)
+        extended_end_time_str = format_seconds_to_time_str(extended_end_sec)
+        original_duration_sec = end_sec - start_sec
 
+        temp_raw_path = os.path.join(task_dir, "raw.mp4")
         output_path = os.path.join(task_dir, "short_clip.mp4")
 
-        def update_prog(msg):
-            if task_id in TASKS:
-                TASKS[task_id]["progress"] = msg
+        TASKS[task_id]["progress"] = "🎬 جاري استخراج وقص الفيديو من يوتيوب..."
+        print(f"[{task_id}] Async Cutting: {start_time_str} to {extended_end_time_str}...", flush=True)
 
-        cut_segment_fast(req.url, start_sec, end_sec, req.quality, output_path, progress_callback=update_prog)
+        ytdl_cmd = [
+            'yt-dlp',
+            '--quiet', '--no-warnings',
+            '--no-playlist',
+            '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
+            '--force-keyframes-at-cuts',
+            '--concurrent-fragments', '5',
+            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            '-f', f"bestvideo[height<={req.quality}]+bestaudio/bestvideo[height<=1080]/best[height<={req.quality}]/best",
+            '--merge-output-format', 'mp4',
+            '-o', temp_raw_path
+        ]
 
-        res_info = f"{req.quality}p"
-        try:
-            probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0', output_path]
-            dim = subprocess.check_output(probe_cmd, text=True, timeout=5).strip()
-            if dim and 'x' in dim:
-                res_info = f"{dim} ({dim.split('x')[1]}p)"
-        except Exception:
-            pass
+        if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+            ytdl_cmd.extend(['--cookies', COOKIE_FILE_PATH])
+
+        ytdl_cmd.append(req.url)
+
+        result = subprocess.run(ytdl_cmd, capture_output=True, text=True)
+
+        if result.returncode != 0 or not os.path.exists(temp_raw_path):
+            print(f"[{task_id}] ⚠️ Direct section cut failed ({result.stderr}). Retrying with fallback stream cut...", flush=True)
+            if os.path.exists(temp_raw_path):
+                try: os.remove(temp_raw_path)
+                except: pass
+            fallback_cmd = [
+                'yt-dlp',
+                '--quiet', '--no-warnings',
+                '--no-playlist',
+                '--download-sections', f"*{start_time_str}-{extended_end_time_str}",
+                '-f', 'mp4/best',
+                '-o', temp_raw_path,
+                req.url
+            ]
+            if os.path.exists(COOKIE_FILE_PATH) and os.path.getsize(COOKIE_FILE_PATH) > 0:
+                fallback_cmd.insert(4, '--cookies')
+                fallback_cmd.insert(5, COOKIE_FILE_PATH)
+            result2 = subprocess.run(fallback_cmd, capture_output=True, text=True)
+            if result2.returncode != 0 or not os.path.exists(temp_raw_path):
+                err_msg = result2.stderr.strip() if result2.stderr else (result.stderr.strip() if result.stderr else "Output MP4 file was not generated by yt-dlp")
+                raise Exception(f"Cutting failed: {err_msg}")
+
+        TASKS[task_id]["progress"] = "✨ جاري تطبيق الفلاتر الصوتية والتلاشي..."
+        start_fade_out = original_duration_sec
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-i', temp_raw_path,
+            '-filter_complex', f"[0:a]volume=1.5,afade=t=in:st=0:d={fade_in_duration},afade=t=out:st={start_fade_out}:d={fade_out_duration}[a]",
+            '-map', '0:v', '-map', '[a]',
+            '-c:v', 'copy',
+            '-c:a', 'aac', '-b:a', '192k',
+            output_path
+        ]
+        
+        filter_result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+        if filter_result.returncode != 0 or not os.path.exists(output_path):
+            if os.path.exists(temp_raw_path):
+                try: os.rename(temp_raw_path, output_path)
+                except: pass
+
+        if os.path.exists(temp_raw_path):
+            try: os.remove(temp_raw_path)
+            except: pass
+
+        if not os.path.exists(output_path):
+            raise Exception("Final clip output file was not found")
 
         video_url = f"public/temp_{task_id}/short_clip.mp4"
         TASKS[task_id] = {
@@ -1552,7 +1565,7 @@ def run_cut_background(task_id: str, req: CutRequest, task_dir: str):
             "progress": "✅ تم قص المقطع بنجاح!",
             "videoUrl": video_url
         }
-        print(f"[{task_id}] Async Cut completed successfully: {video_url} [📺 Quality: {res_info}]", flush=True)
+        print(f"[{task_id}] Async Cut completed successfully: {video_url}", flush=True)
 
     except Exception as e:
         print(f"[{task_id}] Async Cut failed: {e}", flush=True)
@@ -1718,7 +1731,7 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
 
     detector.close()
 
-    # 3. Native Direct FFmpeg Rendering Engine (Ultra-Fast Hardware/SIMD Pipeline)
+    # 3. Fast FFmpeg encoder setup
     has_gpu = False
     try:
         gpu_check = subprocess.run(["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1727,79 +1740,11 @@ def convert_video_to_vertical(video_path: str, output_path: str, progress_callba
     except Exception:
         pass
 
-    codec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"] if has_gpu else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-threads", "0"]
+    codec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "20"] if has_gpu else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "0"]
 
     if progress_callback:
-        progress_callback("⚡ جاري اقتصاص ورندرة الفيديو طولي (9:16) فائق السرعة عبر محرك FFmpeg المباشر...")
+        progress_callback("⚡ جاري اقتصاص ورندرة الفيديو طولي (9:16) فائق السرعة...")
 
-    # محاولة الرندر المباشر فائق السرعة عبر FFmpeg Native Filter (يوفر 80% من الوقت مع الحفاظ التام على جودة 1080p)
-    ffmpeg_native_success = False
-    try:
-        if len(segments) == 1 and scene_plans[0]["mode"] == "single":
-            x1 = scene_plans[0]["x1"]
-            tw = scene_plans[0]["target_w"]
-            fast_vf = f"crop={tw}:{H}:{x1}:0,scale={out_w}:{out_h}"
-            fast_cmd = [
-                "ffmpeg", "-y",
-                "-i", video_path,
-                "-vf", fast_vf,
-                *codec_args,
-                "-pix_fmt", "yuv420p",
-                "-c:a", "copy",
-                "-movflags", "+faststart",
-                output_path
-            ]
-            ff_p = subprocess.run(fast_cmd, capture_output=True, text=True, timeout=120)
-            if ff_p.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                ffmpeg_native_success = True
-                print("🎉 Native FFmpeg Single Crop Succeeded in seconds!", flush=True)
-        elif len(segments) > 1:
-            # Multi-segment native filter_complex
-            filter_parts = []
-            concat_inputs = []
-            for i, (seg, plan) in enumerate(zip(segments, scene_plans)):
-                start_f, end_f = seg
-                prefix = f"v{i}"
-                trim_filter = f"[0:v]trim=start_frame={start_f}:end_frame={end_f},setpts=PTS-STARTPTS"
-                if plan["mode"] == "single":
-                    x1 = plan["x1"]
-                    tw = plan["target_w"]
-                    filter_parts.append(f"{trim_filter},crop={tw}:{H}:{x1}:0,scale={out_w}:{out_h}[{prefix}]")
-                    concat_inputs.append(f"[{prefix}]")
-                elif plan["mode"] == "split":
-                    x1, y1 = plan["top"]
-                    x2, y2 = plan["bottom"]
-                    cw, ch = plan["crop_w"], plan["crop_h"]
-                    filter_parts.append(f"{trim_filter},split=2[{prefix}_raw1][{prefix}_raw2]")
-                    filter_parts.append(f"[{prefix}_raw1]crop={cw}:{ch}:{x1}:{y1},scale={out_w}:{half_h}[{prefix}_top]")
-                    filter_parts.append(f"[{prefix}_raw2]crop={cw}:{ch}:{x2}:{y2},scale={out_w}:{half_h}[{prefix}_bot]")
-                    filter_parts.append(f"[{prefix}_top][{prefix}_bot]vstack,drawbox=y={half_h-1}:color=black@0.9:t=2[{prefix}]")
-                    concat_inputs.append(f"[{prefix}]")
-            
-            fc_string = ";".join(filter_parts) + ";" + "".join(concat_inputs) + f"concat=n={len(concat_inputs)}:v=1:a=0[outv]"
-            fast_cmd = [
-                "ffmpeg", "-y",
-                "-i", video_path,
-                "-filter_complex", fc_string,
-                "-map", "[outv]", "-map", "0:a?",
-                *codec_args,
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k",
-                "-movflags", "+faststart",
-                "-shortest", output_path
-            ]
-            ff_p = subprocess.run(fast_cmd, capture_output=True, text=True, timeout=180)
-            if ff_p.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
-                ffmpeg_native_success = True
-                print("🎉 Native FFmpeg Multi-Scene Filter Complex Succeeded!", flush=True)
-    except Exception as nfe:
-        print(f"⚠️ Native FFmpeg Notice (falling back to frame pipeline): {nfe}", flush=True)
-
-    if ffmpeg_native_success:
-        cap.release()
-        return
-
-    # 4. Fallback Frame Pipeline (إذا لزم الأمر كإجراء احتياطي)
     cmd = [
         "ffmpeg", "-y",
         "-f", "rawvideo", "-pix_fmt", "bgr24",

@@ -22,9 +22,8 @@ COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install latest master / nightly version of yt-dlp with full default extras
-RUN pip install -U --pre "yt-dlp[default]" && \
-    pip install -U --no-cache-dir https://github.com/yt-dlp/yt-dlp/archive/refs/heads/master.tar.gz
+# Install latest nightly version of yt-dlp
+RUN pip install -U --pre "yt-dlp[default]"
 
 # Copy application files
 COPY . .
