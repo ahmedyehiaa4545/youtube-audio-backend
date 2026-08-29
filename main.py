@@ -440,7 +440,9 @@ def download_audio_smart(youtube_url: str, output_path: str, task_id: str = None
 
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([youtube_url])
+            info = ydl.extract_info(youtube_url, download=True)
+            if info and task_id and task_id in TASKS:
+                TASKS[task_id]["videoTitle"] = info.get("title", "")
     except Exception as ydl_err:
         print(f"⚠️ Primary yt_dlp download notice: {ydl_err}", flush=True)
 
@@ -794,7 +796,8 @@ def run_transcription_background(task_id: str, youtube_url: str, gemini_api_key:
             "status": "success",
             "progress": "اكتمل بنجاح!",
             "audioUrl": f"public/temp_{task_id}/audio.mp3",
-            "transcription": transcription_text
+            "transcription": transcription_text,
+            "videoTitle": TASKS[task_id].get("videoTitle", "")
         })
         
     except Exception as e:
